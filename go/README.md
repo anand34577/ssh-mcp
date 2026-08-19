@@ -368,3 +368,7 @@ chmod +x ./dist/ssh-mcp-server-linux-amd64
 ### Windows says the executable is not compatible
 
 Use `ssh-mcp-server-windows-amd64.exe` on Intel/AMD 64-bit Windows. The Linux binaries cannot run on Windows.
+
+## License
+
+This project is licensed under the [MIT License](../LICENSE).

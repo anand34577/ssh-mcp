@@ -90,6 +90,18 @@ go vet ./...
 
 Every push and pull request runs Go formatting, tests, race detection, `go vet`, all three Go cross-builds, and Java 11 tests. Pushing a tag such as `v1.0.0` builds the three Go release artifacts, generates SHA-256 checksums, and publishes a GitHub Release with generated notes.
 
+To publish a release:
+
+```bash
+git add .
+git commit -m "Prepare release v1.0.0"
+git tag -a v1.0.0 -m "Release v1.0.0"
+git push origin main
+git push origin v1.0.0
+```
+
+The tag push automatically starts `.github/workflows/release.yml`. The workflow builds Windows AMD64, Linux AMD64, and Linux ARM64 binaries and publishes them with checksum files.
+
 ## Configuration and security
 
 Each configured server should use an indirect credential reference:
@@ -170,4 +182,4 @@ For Java changes, run `mvn test` from `java/`. Never commit real server configur
 
 ## License
 
-Choose and add a license before publishing this repository publicly. The project intentionally does not assume a license on behalf of its owner.
+This project is licensed under the [MIT License](LICENSE).
