@@ -1,0 +1,33 @@
+{
+  "servers": [
+    {
+      "id": "production",
+      "host": "server.example.com",
+      "port": 22,
+      "username": "deploy",
+      "privateKeyPath": "${user.home}/.ssh/id_ed25519",
+      "privateKeyPassphraseEnv": "SSH_MCP_PRODUCTION_KEY_PASSPHRASE",
+      "knownHostsPath": "${user.home}/.ssh/known_hosts",
+      "strictHostKeyChecking": true,
+      "connectTimeoutMs": 10000,
+      "commandTimeoutMs": 60000,
+      "maxOutputBytes": 1048576,
+      "maxConcurrentOperations": 4,
+      "allowSftp": true,
+      "allowPortForwarding": false,
+      "allowedCommandPrefixes": [],
+      "deniedCommandRegexes": [
+        "(?i).*\\b(shutdown|reboot|poweroff)\\b.*"
+      ]
+    },
+    {
+      "id": "staging-password-auth",
+      "host": "staging.example.com",
+      "port": 22,
+      "username": "ops",
+      "passwordEnv": "SSH_MCP_STAGING_PASSWORD",
+      "knownHostsPath": "${user.home}/.ssh/known_hosts",
+      "strictHostKeyChecking": true
+    }
+  ]
+}

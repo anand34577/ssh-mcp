@@ -1,0 +1,12 @@
+target/
+dist/
+*.log
+config/servers.json
+config/*.key
+config/*.pem
+config/*.ppk
+config/known_hosts
+.idea/
+.vscode/
+*.iml
+
