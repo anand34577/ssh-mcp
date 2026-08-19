@@ -1,6 +1,13 @@
 target/
 dist/
+go/bin/
+go/coverage/
+*.test
 *.log
+*.out
+coverage.out
+.env
+.env.*
 config/servers.json
 config/*.key
 config/*.pem
@@ -9,4 +16,3 @@ config/known_hosts
 .idea/
 .vscode/
 *.iml
-

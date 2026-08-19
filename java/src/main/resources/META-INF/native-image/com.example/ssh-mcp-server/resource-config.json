@@ -1,0 +1,10 @@
+{
+  "resources": {
+    "includes": [
+      { "pattern": "META-INF/services/.*" },
+      { "pattern": "org/apache/sshd/.*" },
+      { "pattern": "org/bouncycastle/.*" },
+      { "pattern": "org/slf4j/.*" }
+    ]
+  }
+}

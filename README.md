@@ -1,116 +1,173 @@
 # SSH MCP Server
 
-A standalone MCP server that lets an MCP client use configured SSH targets for command execution, SFTP, and optional loopback-only TCP forwarding. It supports multiple targets in one process and runs on Java 11 or newer on Linux and Windows.
+> Give AI assistants controlled access to SSH, SFTP, and secure tunnels—without exposing your credentials.
 
-The server uses MCP stdio transport: JSON-RPC messages are read from stdin and responses are written to stdout. Operational logs go to stderr, so they cannot corrupt the MCP stream.
+SSH MCP Server is a production-minded [Model Context Protocol](https://modelcontextprotocol.io/) server for connecting an AI client to one or many SSH targets. It provides command execution, SFTP file operations, and optional loopback-only TCP forwarding through a simple MCP stdio process.
 
-## Why this implementation
+The recommended implementation is Go: it builds small, self-contained binaries for Windows AMD64, Linux AMD64, and Linux ARM64. A Java 11 implementation is included for environments that prefer the JVM.
 
-The official Java MCP SDK currently has a Java 17 build baseline. This project keeps the MCP wire implementation small and Java 11-compatible, while using Apache MINA SSHD for the SSH client layer. The result is a smaller executable and a Java 11 runtime target without taking a Spring Boot runtime dependency.
+## Why this project
 
-## Build
+AI assistants are useful when they can inspect systems and perform operational tasks, but SSH credentials should never become part of the model conversation. This server keeps credentials in the server process, verifies host keys, applies per-target limits and policies, and exposes only safe operational metadata to the MCP client.
 
-Requirements:
+## Highlights
 
-- JDK 11 (the build is compiled with `--release 11`)
-- Maven 3.6.3 or newer
+- Multiple SSH servers in one MCP process, selected by a stable `serverId`.
+- Remote command execution with timeouts, output limits, exit status, and truncation reporting.
+- SFTP listing, metadata, bounded reads, writes, directory creation, and deletion.
+- Optional SSH TCP forwarding restricted to loopback addresses.
+- Passwords and key passphrases loaded from environment variables; no inline secrets.
+- Strict `known_hosts` verification by default.
+- Per-server command allow/deny policies and concurrency limits.
+- Audit logging to stderr without command text or credentials.
+- Portable Go binaries that require no Go, Java, JDK, JRE, C compiler, or Visual Studio at runtime.
 
-```bash
-mvn clean verify
+## Choose an implementation
+
+| Implementation | Best for | Location |
+|---|---|---|
+| Go | Recommended single-file deployment | [`go/`](go/) |
+| Java 11 | JVM-based deployments and Java tooling | [`java/`](java/) |
+
+The detailed Go setup, configuration, MCP client examples, tool reference, security guidance, and troubleshooting are in [`go/README.md`](go/README.md).
+
+## Quick start with the Go binary
+
+Download the release artifact for the target platform, then copy the configuration template:
+
+```powershell
+Copy-Item .\config\servers.example.json .\config\servers.json
 ```
 
-The executable uber-JAR is:
+Edit `config/servers.json` and set `SSH_MCP_CONFIG` plus the credential environment variables in the MCP client's process environment. Start the correct binary:
+
+```powershell
+& .\go\dist\ssh-mcp-server-windows-amd64.exe `
+  -config (Resolve-Path .\config\servers.json)
+```
+
+The Linux artifacts are:
 
 ```text
-target/ssh-mcp-server.jar
+go/dist/ssh-mcp-server-linux-amd64
+go/dist/ssh-mcp-server-linux-arm64
 ```
 
-## Configure targets
+The server uses MCP stdio transport: protocol messages use stdout, and operational logs use stderr. Do not mix diagnostic output into stdout.
 
-Copy `config/servers.example.json` to `config/servers.json`. Each entry has a unique `id`; the model sends that id to every SSH tool, so one server process can safely manage multiple targets.
+## Build the release matrix
 
-Credentials are deliberately indirect:
+Go 1.26 or newer is required only to build. The build uses `CGO_ENABLED=0` and produces:
 
-- Passwords are read from `passwordEnv`.
-- Private keys are read from `privateKeyPath`.
-- Encrypted private-key passphrases are read from `privateKeyPassphraseEnv`.
-- Inline `password`, `passphrase`, `privateKey`, `privateKeyContent`, and `secret` fields are rejected.
+- Windows AMD64: `go/dist/ssh-mcp-server-windows-amd64.exe`
+- Linux AMD64: `go/dist/ssh-mcp-server-linux-amd64`
+- Linux ARM64: `go/dist/ssh-mcp-server-linux-arm64`
 
-Set the environment variables in the MCP client process environment, for example:
+From Windows, build all three targets:
 
-```text
-SSH_MCP_STAGING_PASSWORD=provided-by-your-secret-manager
-SSH_MCP_PRODUCTION_KEY_PASSPHRASE=provided-by-your-secret-manager
+```powershell
+cd go
+powershell -ExecutionPolicy Bypass -File .\scripts\build-all.ps1
 ```
 
-The values are never MCP tool arguments, never returned by `ssh_list_servers`, and are not written to the audit log. Protect the process environment and the private-key files with the operating system’s normal account/service permissions.
-
-## Host-key security
-
-Strict host-key verification is required by default. Every target must specify an existing `knownHostsPath`. Populate it using a trusted administrative channel and verify the fingerprint out of band before starting the server:
+From a Unix shell, build one Linux target:
 
 ```bash
-ssh-keyscan -H server.example.com >> ~/.ssh/known_hosts
+cd go
+GOOS=linux GOARCH=amd64 ./scripts/build-unix.sh
+GOOS=linux GOARCH=arm64 ./scripts/build-unix.sh
 ```
 
-Do not use `StrictHostKeyChecking=no` in production. An explicit insecure exception requires `SSH_MCP_ALLOW_INSECURE_HOST_KEYS=true` in the process environment and `strictHostKeyChecking: false` in the target configuration.
+Run the Go checks locally:
 
-## MCP client configuration
+```bash
+cd go
+go test ./...
+go vet ./...
+```
 
-Point the client at the launcher or the JAR. Example shape for a client that supports MCP server configuration:
+## GitHub Actions
+
+Every push and pull request runs Go formatting, tests, race detection, `go vet`, all three Go cross-builds, and Java 11 tests. Pushing a tag such as `v1.0.0` builds the three Go release artifacts, generates SHA-256 checksums, and publishes a GitHub Release with generated notes.
+
+## Configuration and security
+
+Each configured server should use an indirect credential reference:
 
 ```json
 {
-  "mcpServers": {
-    "ssh": {
-      "command": "C:\\path\\to\\dist\\bin\\ssh-mcp-server.cmd",
-      "env": {
-        "SSH_MCP_CONFIG": "C:\\path\\to\\config\\servers.json",
-        "SSH_MCP_STAGING_PASSWORD": "injected-by-the-client-secret-store"
-      }
-    }
-  }
+  "id": "production",
+  "host": "server.example.com",
+  "port": 22,
+  "username": "deploy",
+  "privateKeyPath": "${user.home}/.ssh/id_ed25519",
+  "privateKeyPassphraseEnv": "SSH_MCP_PRODUCTION_KEY_PASSPHRASE",
+  "knownHostsPath": "${user.home}/.ssh/known_hosts",
+  "strictHostKeyChecking": true,
+  "allowSftp": true,
+  "allowPortForwarding": false,
+  "allowedCommandPrefixes": ["systemctl status", "journalctl"],
+  "deniedCommandRegexes": ["(?i).*\\b(shutdown|reboot|poweroff)\\b.*"]
 }
 ```
 
-On Unix, use `dist/bin/ssh-mcp-server`. You can also use `java -jar target/ssh-mcp-server.jar`; the configuration path defaults to `config/servers.json` and can be overridden with `SSH_MCP_CONFIG` or `-Dssh.mcp.config=...`.
+Passwords use `passwordEnv`; private keys use `privateKeyPath`; encrypted key passphrases use `privateKeyPassphraseEnv`. The values of those environment variables are never MCP arguments, tool results, or audit-log fields. Inline `password`, `passphrase`, `privateKey`, `privateKeyContent`, and `secret` fields are rejected.
 
-## Tools
+Strict host-key checking is enabled by default. Verify host fingerprints out of band before adding them to `known_hosts`. Keep `allowPortForwarding` disabled unless it is explicitly required, use least-privilege remote accounts, and treat command execution and SFTP writes/deletes as privileged operations.
 
-- `ssh_list_servers` — non-secret target metadata and capabilities.
-- `ssh_exec` — bounded remote command execution with timeout, output cap, audit hash, and optional allow/deny command policy.
-- `sftp_list`, `sftp_stat`, `sftp_read_file`, `sftp_write_file`, `sftp_mkdir`, `sftp_delete` — remote file operations. Reads have explicit byte limits; writes accept UTF-8 or base64 data.
-- `ssh_tunnel_open`, `ssh_tunnel_close`, `ssh_tunnel_list` — optional local TCP forwarding. Forwarding is disabled by default, and binds are loopback-only.
+## MCP tools
 
-`ssh_exec` is intentionally powerful. The remote account’s Unix/Windows permissions remain the primary security boundary. For production, use a least-privilege account and set `allowedCommandPrefixes` or `deniedCommandRegexes` for each target. SFTP and forwarding can be disabled independently.
+- `ssh_list_servers` — list configured targets and non-secret capabilities.
+- `ssh_exec` — execute a bounded remote command.
+- `sftp_list` — list a remote directory.
+- `sftp_stat` — inspect remote file or directory metadata.
+- `sftp_read_file` — read bounded UTF-8 or base64 content.
+- `sftp_write_file` — write bounded UTF-8 or base64 content.
+- `sftp_mkdir` — create a remote directory.
+- `sftp_delete` — delete a file or empty directory.
+- `ssh_tunnel_open` — open a loopback-only local TCP forward.
+- `ssh_tunnel_close` — close a tunnel.
+- `ssh_tunnel_list` — list active tunnels without credentials.
 
-## Portable and native executable packaging
+See [`go/README.md`](go/README.md) for request examples and client configuration.
 
-JDK 11 does not contain `jpackage`, so the packaging scripts always create a portable, self-contained distribution using a JDK 11 `jlink` runtime:
+## Java implementation
 
-Windows PowerShell:
+The Java implementation targets Java 11 and includes Maven, jlink, jpackage, and optional GraalVM Native Image workflows:
 
 ```powershell
-$env:JAVA_HOME = 'C:\Program Files\Eclipse Adoptium\jdk-11.0.31.11-hotspot'
-powershell -ExecutionPolicy Bypass -File .\scripts\package-windows.ps1
+cd java
+mvn clean verify
 ```
 
-Linux/macOS:
+Read [`java/README.md`](java/README.md) for Java packaging details. The bundled-runtime app image runs without Java installed on the target machine. A Windows GraalVM Native Image build requires the MSVC/Windows SDK toolchain; TDM-GCC cannot replace that linker toolchain.
+
+## Repository layout
+
+```text
+config/                         Shared configuration template
+go/                             Recommended Go implementation
+  cmd/ssh-mcp-server/           Executable entry point
+  internal/config/              Configuration and validation
+  internal/mcpserver/           MCP tool registration
+  internal/sshservice/          SSH, SFTP, and tunnel operations
+  scripts/                      Cross-platform build scripts
+java/                           Java 11 implementation
+.github/workflows/              Continuous integration and release automation
+```
+
+## Contributing
+
+Before opening a pull request:
 
 ```bash
-export JAVA_HOME=/path/to/jdk-11
-chmod +x scripts/package-unix.sh
-scripts/package-unix.sh
+cd go
+go test ./...
+go vet ./...
 ```
 
-The portable distribution contains `dist/runtime`, the application JAR, and an executable launcher under `dist/bin`. If a JDK 14+ `jpackage` tool is available while packaging, the scripts additionally create an OS app image under `dist/native`; on Windows that includes an `.exe` launcher. The application itself is still compiled for and runs on Java 11 because the app image uses the JDK 11 runtime image created by `jlink`.
+For Java changes, run `mvn test` from `java/`. Never commit real server configurations, private keys, passwords, host fingerprints from private infrastructure, or generated binaries.
 
-## Security and operations checklist
+## License
 
-- Keep `servers.json`, private keys, and process environment permissions restricted to the service account.
-- Verify every known-hosts fingerprint out of band; do not accept unknown keys automatically.
-- Use dedicated least-privilege remote accounts.
-- Keep `allowPortForwarding` false unless it is specifically needed.
-- Keep output and timeout limits appropriate for the target.
-- Route stderr to a protected service log. Audit messages contain target ids, operation names, durations, and a command hash, never command text or credentials.
-- Review tool calls because the server can perform destructive remote actions when the configured remote account permits them.
+Choose and add a license before publishing this repository publicly. The project intentionally does not assume a license on behalf of its owner.
