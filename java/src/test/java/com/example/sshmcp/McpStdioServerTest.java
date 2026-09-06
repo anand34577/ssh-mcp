@@ -49,4 +49,32 @@ class McpStdioServerTest {
         assertTrue(listing.contains("secretsExposedToModel"));
         assertTrue(!listing.contains("SSH_MCP_TEST_PASSWORD"));
     }
+
+    @Test
+    void returnsErrorsForMalformedRequestsAndSuppressesNotifications() throws Exception {
+        Path knownHosts = Files.createFile(tempDir.resolve("known_hosts_protocol"));
+        ObjectNode config = mapper.createObjectNode();
+        config.put("id", "test");
+        config.put("host", "example.test");
+        config.put("username", "operator");
+        config.put("passwordEnv", "SSH_MCP_TEST_PASSWORD");
+        config.put("knownHostsPath", knownHosts.toString());
+        Config.ServerConfig server = Config.ServerConfig.from(config);
+        Config.ServerCatalog catalog = new Config.ServerCatalog(tempDir.resolve("protocol-servers.json"),
+                Collections.singletonMap("test", server));
+        SshService ssh = new SshService(mapper, catalog);
+
+        String input = "not-json\n"
+                + "{\"jsonrpc\":\"2.0\",\"id\":1}\n"
+                + "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"ping\"} {\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"ping\"}\n"
+                + "{\"jsonrpc\":\"2.0\",\"method\":\"ping\"}\n";
+        ByteArrayOutputStream output = new ByteArrayOutputStream();
+        new McpStdioServer(mapper, ssh).run(new ByteArrayInputStream(input.getBytes(StandardCharsets.UTF_8)), output);
+
+        String[] lines = output.toString(StandardCharsets.UTF_8.name()).trim().split("\\R");
+        assertEquals(3, lines.length);
+        assertEquals(-32700, mapper.readTree(lines[0]).path("error").path("code").asInt());
+        assertEquals(-32600, mapper.readTree(lines[1]).path("error").path("code").asInt());
+        assertEquals(-32700, mapper.readTree(lines[2]).path("error").path("code").asInt());
+    }
 }

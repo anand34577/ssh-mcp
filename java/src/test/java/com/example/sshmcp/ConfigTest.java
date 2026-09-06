@@ -27,6 +27,22 @@ class ConfigTest {
     }
 
     @Test
+    void rejectsUnknownServerFields() {
+        ObjectNode node = baseServer();
+        node.put("allowSFTP", false);
+
+        assertThrows(Exception.class, () -> Config.ServerConfig.from(node));
+    }
+
+    @Test
+    void rejectsCaseVariantInlineSecrets() {
+        ObjectNode node = baseServer();
+        node.put("Password", "must-not-be-here");
+
+        assertThrows(Exception.class, () -> Config.ServerConfig.from(node));
+    }
+
+    @Test
     void loadsMultipleServersWithSecretReferencesOnly() throws Exception {
         Path knownHosts = Files.createFile(tempDir.resolve("known_hosts"));
         ObjectNode first = baseServer();

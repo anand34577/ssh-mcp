@@ -4,20 +4,25 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import com.fasterxml.jackson.core.JsonParser;
 
-import java.io.BufferedReader;
+import java.io.BufferedInputStream;
 import java.io.BufferedWriter;
+import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
-import java.io.InputStreamReader;
 import java.io.OutputStream;
 import java.io.OutputStreamWriter;
+import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
+import java.nio.charset.CharacterCodingException;
+import java.nio.charset.CodingErrorAction;
 import java.util.Arrays;
 import java.util.HashSet;
 import java.util.Set;
 
 final class McpStdioServer {
+    private static final int MAX_MESSAGE_BYTES = 128 * 1024 * 1024;
     private static final String SERVER_NAME = "ssh-mcp-server";
     private static final String SERVER_VERSION = "1.0.0";
     private static final String DEFAULT_PROTOCOL_VERSION = "2025-06-18";
@@ -33,20 +38,59 @@ final class McpStdioServer {
     }
 
     void run(InputStream input, OutputStream output) throws IOException {
-        BufferedReader reader = new BufferedReader(new InputStreamReader(input, StandardCharsets.UTF_8));
+        BufferedInputStream reader = new BufferedInputStream(input, 64 * 1024);
         BufferedWriter writer = new BufferedWriter(new OutputStreamWriter(output, StandardCharsets.UTF_8));
-        String line;
-        while ((line = reader.readLine()) != null) {
+        byte[] frame;
+        while (true) {
+            try {
+                frame = readLineLimited(reader);
+            }
+            catch (IOException ex) {
+                if (!"MCP message exceeds the maximum allowed size".equals(ex.getMessage())) {
+                    throw ex;
+                }
+                AuditLog.failure("mcp_frame", ex);
+                writer.write(mapper.writeValueAsString(error(null, -32600, ex.getMessage())));
+                writer.newLine();
+                writer.flush();
+                return;
+            }
+            if (frame == null) {
+                break;
+            }
+            String line;
+            try {
+                line = StandardCharsets.UTF_8.newDecoder()
+                        .onMalformedInput(CodingErrorAction.REPORT)
+                        .onUnmappableCharacter(CodingErrorAction.REPORT)
+                        .decode(ByteBuffer.wrap(frame)).toString();
+            }
+            catch (CharacterCodingException ex) {
+                AuditLog.failure("mcp_request", ex);
+                writer.write(mapper.writeValueAsString(error(null, -32700, "Invalid UTF-8 JSON-RPC request")));
+                writer.newLine();
+                writer.flush();
+                continue;
+            }
             if (line.trim().isEmpty()) {
                 continue;
             }
             ObjectNode response = null;
             JsonNode requestId = null;
             try {
-                JsonNode request = mapper.readTree(line);
+                JsonNode request;
+                try (JsonParser parser = mapper.getFactory().createParser(line)) {
+                    request = mapper.readTree(parser);
+                    if (parser.nextToken() != null) {
+                        throw new IOException("Trailing JSON-RPC data");
+                    }
+                }
                 if (request != null && request.isObject()) {
                     requestId = request.get("id");
-                    if (request.has("method")) {
+                    if (!request.has("method")) {
+                        response = error(requestId, -32600, "method is required");
+                    }
+                    else {
                         response = handle(request);
                     }
                 }
@@ -56,9 +100,7 @@ final class McpStdioServer {
             }
             catch (Exception ex) {
                 AuditLog.failure("mcp_request", ex);
-                if (requestId != null) {
-                    response = error(requestId, -32700, "Invalid JSON-RPC request");
-                }
+                response = error(null, -32700, "Invalid JSON-RPC request");
             }
             if (response != null) {
                 writer.write(mapper.writeValueAsString(response));
@@ -68,31 +110,53 @@ final class McpStdioServer {
         }
     }
 
+    private static byte[] readLineLimited(InputStream reader) throws IOException {
+        ByteArrayOutputStream line = new ByteArrayOutputStream();
+        int value;
+        while ((value = reader.read()) >= 0) {
+            if (value == '\n') {
+                return line.toByteArray();
+            }
+            if (line.size() >= MAX_MESSAGE_BYTES) {
+                throw new IOException("MCP message exceeds the maximum allowed size");
+            }
+            line.write(value);
+        }
+        return line.size() == 0 ? null : line.toByteArray();
+    }
+
     private ObjectNode handle(JsonNode request) {
         String method = text(request, "method");
         JsonNode id = request.get("id");
+        boolean hasId = request.has("id");
         try {
+            if (!"2.0".equals(text(request, "jsonrpc"))) {
+                return hasId ? error(id, -32600, "jsonrpc must be '2.0'") : null;
+            }
             if (method == null) {
-                return error(id, -32600, "method is required");
+                return hasId ? error(id, -32600, "method is required") : null;
             }
             if ("initialize".equals(method)) {
-                return result(id, initialize(request));
+                return hasId ? result(id, initialize(request)) : null;
             }
             if ("notifications/initialized".equals(method) || "initialized".equals(method)) {
                 return null;
             }
             if ("ping".equals(method)) {
-                return result(id, mapper.createObjectNode());
+                return hasId ? result(id, mapper.createObjectNode()) : null;
             }
             if ("tools/list".equals(method)) {
-                return result(id, toolsList());
+                return hasId ? result(id, toolsList()) : null;
             }
             if ("tools/call".equals(method)) {
                 JsonNode params = request.get("params");
                 if (params == null || !params.isObject() || !params.has("name")) {
-                    return error(id, -32602, "tools/call requires params.name");
+                    return hasId ? error(id, -32602, "tools/call requires params.name") : null;
                 }
                 String name = text(params, "name");
+                if (name == null) {
+                    return hasId ? error(id, -32602, "tools/call params.name must be a string") : null;
+                }
                 SshService.ToolResult toolResult = ssh.call(name, params.get("arguments"));
                 ObjectNode payload = mapper.createObjectNode();
                 ArrayNode content = payload.putArray("content");
@@ -100,9 +164,9 @@ final class McpStdioServer {
                 contentItem.put("type", "text");
                 contentItem.put("text", mapper.writeValueAsString(toolResult.payload()));
                 payload.put("isError", toolResult.isError());
-                return result(id, payload);
+                return hasId ? result(id, payload) : null;
             }
-            if (id == null) {
+            if (!hasId) {
                 return null;
             }
             return error(id, -32601, "Method not found");

@@ -40,6 +40,7 @@ Edit `config/servers.json`. A configuration can contain multiple SSH targets:
       "commandTimeoutMs": 60000,
       "maxOutputBytes": 1048576,
       "maxConcurrentOperations": 4,
+      "maxConcurrentTunnels": 4,
       "allowSftp": true,
       "allowPortForwarding": false,
       "allowedCommandPrefixes": [],
@@ -67,9 +68,13 @@ Important configuration rules:
 - `passwordEnv` and `privateKeyPassphraseEnv` contain environment-variable names, not secret values.
 - Inline `password`, `passphrase`, `privateKey`, `privateKeyContent`, and `secret` fields are rejected.
 - Strict host-key verification is enabled by default and requires an existing `knownHostsPath`.
+- For an explicitly temporary compatibility/emergency mode, set `SSH_MCP_AUTO_ACCEPT_HOST_KEYS=true`; this accepts new and changed host keys for every configured target and disables MITM protection. Keep it unset in normal or production use.
 - SFTP is enabled by default when `allowSftp` is omitted.
 - Port forwarding is disabled by default.
 - `maxOutputBytes`, `commandTimeoutMs`, and `maxConcurrentOperations` protect the server from unbounded work.
+- `maxConcurrentOperations` bounds concurrent `ssh_exec`/`sftp_*` calls per server; `maxConcurrentTunnels` bounds concurrent open port forwards per server, independently. A long-lived tunnel never consumes an exec/SFTP slot (or vice versa), so opening several tunnels cannot starve command execution on the same target.
+- Password authentication also answers single-prompt keyboard-interactive challenges (common on PAM-backed servers) with the same `passwordEnv` value, so `passwordEnv` works whether the server advertises `password` or `keyboard-interactive`.
+- Unknown root/server fields are rejected. If `allowedCommandPrefixes` is non-empty, shell-control characters and prefix lookalikes are rejected; configure simple command prefixes accordingly.
 
 Protect `servers.json`, private keys, and the process environment with the operating system account permissions.
 
@@ -207,7 +212,7 @@ Runs a remote command.
 }
 ```
 
-The result contains `stdout`, `stderr`, `exitCode`, `timedOut`, truncation flags, and `durationMs`. A non-zero remote exit code is returned as command result data; it is not treated as a server crash.
+The result contains `stdout`, `stderr`, `exitCode`, `exitSignal`, `timedOut`, truncation flags, and `durationMs`. A non-zero remote exit code is returned as command result data; it is not treated as a server crash. If the remote process was killed by a signal rather than exiting normally, `exitCode` is `null` and `exitSignal` names the signal (for example `"KILL"`).
 
 ### `sftp_list`
 
