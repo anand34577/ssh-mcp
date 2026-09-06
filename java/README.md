@@ -57,6 +57,8 @@ ssh-keyscan -H server.example.com >> ~/.ssh/known_hosts
 
 Do not use `StrictHostKeyChecking=no` in production. An explicit insecure exception requires `SSH_MCP_ALLOW_INSECURE_HOST_KEYS=true` in the process environment and `strictHostKeyChecking: false` in the target configuration.
 
+For a temporary compatibility/emergency mode only, `SSH_MCP_AUTO_ACCEPT_HOST_KEYS=true` accepts new and changed host keys for every configured target, even when strict checking is enabled. This disables MITM protection; keep it unset in normal or production use.
+
 ## MCP client configuration
 
 Point the client at the launcher or the JAR. Example shape for a client that supports MCP server configuration:
@@ -83,6 +85,12 @@ On Unix, use `dist/bin/ssh-mcp-server`. You can also use `java -jar target/ssh-m
 - `ssh_exec` — bounded remote command execution with timeout, output cap, audit hash, and optional allow/deny command policy.
 - `sftp_list`, `sftp_stat`, `sftp_read_file`, `sftp_write_file`, `sftp_mkdir`, `sftp_delete` — remote file operations. Reads have explicit byte limits; writes accept UTF-8 or base64 data.
 - `ssh_tunnel_open`, `ssh_tunnel_close`, `ssh_tunnel_list` — optional local TCP forwarding. Forwarding is disabled by default, and binds are loopback-only.
+
+Configuration rejects unknown root/server fields. With `allowedCommandPrefixes`, command matching requires a complete prefix boundary and rejects shell-control characters; this conservative rule prevents common shell-chaining bypasses. Command and SFTP operations are bounded by the configured timeout, and timed-out work closes its SSH connection.
+
+`maxConcurrentOperations` (default 4) bounds concurrent `ssh_exec`/`sftp_*` calls per server. `maxConcurrentTunnels` (default 4) bounds concurrent open port forwards per server, using a separate permit pool — a long-lived tunnel never consumes an exec/SFTP slot, so tunnels cannot starve command execution on the same target and vice versa.
+
+Password authentication (`passwordEnv`) also satisfies single-prompt keyboard-interactive challenges automatically (Apache MINA SSHD answers a lone, non-echoed, password-looking prompt with the configured password), so it works against servers that only advertise `keyboard-interactive`.
 
 `ssh_exec` is intentionally powerful. The remote account’s Unix/Windows permissions remain the primary security boundary. For production, use a least-privilege account and set `allowedCommandPrefixes` or `deniedCommandRegexes` for each target. SFTP and forwarding can be disabled independently.
 

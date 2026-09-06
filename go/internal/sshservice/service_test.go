@@ -45,3 +45,26 @@ func TestTunnelRequiresLoopback(t *testing.T) {
 		t.Fatal("non-loopback tunnel bind was accepted")
 	}
 }
+
+func TestCommandPolicyRejectsShellOperators(t *testing.T) {
+	service := testService()
+	defer service.Close()
+	server := service.catalog.Servers["test"]
+	server.AllowedCommandPrefixes = []string{"systemctl status"}
+	if err := checkCommandPolicy(server, "systemctl status ; rm -rf /"); err == nil {
+		t.Fatal("shell operator was accepted by an allowlisted command")
+	}
+}
+
+func TestCommandPolicyRequiresPrefixBoundary(t *testing.T) {
+	service := testService()
+	defer service.Close()
+	server := service.catalog.Servers["test"]
+	server.AllowedCommandPrefixes = []string{"systemctl status"}
+	if err := checkCommandPolicy(server, "systemctl status-malicious"); err == nil {
+		t.Fatal("prefix without a command boundary was accepted")
+	}
+	if err := checkCommandPolicy(server, "systemctl status\tunit"); err != nil {
+		t.Fatalf("whitespace-separated command was rejected: %v", err)
+	}
+}

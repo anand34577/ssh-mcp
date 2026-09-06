@@ -26,9 +26,17 @@ public final class Main {
             return;
         }
 
+        if (Config.autoAcceptHostKeys()) {
+            System.err.println("WARNING: SSH_MCP_AUTO_ACCEPT_HOST_KEYS is enabled; host-key verification is disabled for every target");
+        }
+
         final SshService ssh = new SshService(mapper, catalog);
         Runtime.getRuntime().addShutdownHook(new Thread(ssh::close, "ssh-mcp-shutdown"));
-        new McpStdioServer(mapper, ssh).run(System.in, System.out);
-        ssh.close();
+        try {
+            new McpStdioServer(mapper, ssh).run(System.in, System.out);
+        }
+        finally {
+            ssh.close();
+        }
     }
 }

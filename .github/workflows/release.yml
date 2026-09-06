@@ -1,4 +1,4 @@
-name: Release Go binaries
+name: Release binaries
 
 on:
   push:
@@ -11,8 +11,8 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  build:
-    name: Build ${{ matrix.goos }}/${{ matrix.goarch }}
+  go-build:
+    name: Go ${{ matrix.goos }}/${{ matrix.goarch }}
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -21,10 +21,19 @@ jobs:
           - goos: windows
             goarch: amd64
             extension: .exe
+          - goos: windows
+            goarch: arm64
+            extension: .exe
           - goos: linux
             goarch: amd64
             extension: ''
           - goos: linux
+            goarch: arm64
+            extension: ''
+          - goos: darwin
+            goarch: amd64
+            extension: ''
+          - goos: darwin
             goarch: arm64
             extension: ''
     permissions:
@@ -62,16 +71,127 @@ jobs:
       - name: Upload release artifact
         uses: actions/upload-artifact@v4
         with:
-          name: ssh-mcp-server-${{ matrix.goos }}-${{ matrix.goarch }}
+          name: ssh-mcp-server-go-${{ matrix.goos }}-${{ matrix.goarch }}
           path: |
             go/dist/ssh-mcp-server-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.extension }}
             go/dist/ssh-mcp-server-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.extension }}.sha256
           if-no-files-found: error
 
+  java-jar:
+    name: Java portable jar
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    defaults:
+      run:
+        working-directory: java
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v6
+
+      - name: Set up JDK 11
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '11'
+          cache: maven
+
+      - name: Build shaded jar
+        run: mvn -B -ntp -DskipTests clean package
+
+      - name: Stage jar
+        shell: bash
+        run: |
+          mkdir -p dist-release
+          cp target/ssh-mcp-server.jar dist-release/ssh-mcp-server.jar
+          cd dist-release
+          sha256sum ssh-mcp-server.jar > ssh-mcp-server.jar.sha256
+
+      - name: Upload release artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ssh-mcp-server-java-jar
+          path: |
+            java/dist-release/ssh-mcp-server.jar
+            java/dist-release/ssh-mcp-server.jar.sha256
+          if-no-files-found: error
+
+  java-runtime:
+    name: Java runtime ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            platform: linux-x64
+            script: scripts/package-unix.sh
+            archive: tar
+          - os: macos-latest
+            platform: macos-arm64
+            script: scripts/package-unix.sh
+            archive: tar
+          - os: windows-latest
+            platform: windows-x64
+            script: scripts/package-windows.ps1
+            archive: zip
+    permissions:
+      contents: read
+    defaults:
+      run:
+        working-directory: java
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v6
+
+      - name: Set up JDK 11
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '11'
+          cache: maven
+
+      - name: Build portable runtime (Unix)
+        if: matrix.archive == 'tar'
+        shell: bash
+        run: |
+          chmod +x ${{ matrix.script }}
+          ./${{ matrix.script }}
+
+      - name: Build portable runtime (Windows)
+        if: matrix.archive == 'zip'
+        shell: pwsh
+        run: ./${{ matrix.script }}
+
+      - name: Archive runtime (tar)
+        if: matrix.archive == 'tar'
+        shell: bash
+        run: |
+          mkdir -p dist-release
+          tar -C dist -czf "dist-release/ssh-mcp-server-${{ matrix.platform }}.tar.gz" .
+          sha256sum "dist-release/ssh-mcp-server-${{ matrix.platform }}.tar.gz" \
+            > "dist-release/ssh-mcp-server-${{ matrix.platform }}.tar.gz.sha256"
+
+      - name: Archive runtime (zip)
+        if: matrix.archive == 'zip'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path dist-release | Out-Null
+          Compress-Archive -Path dist\* -DestinationPath "dist-release/ssh-mcp-server-${{ matrix.platform }}.zip"
+          $hash = Get-FileHash "dist-release/ssh-mcp-server-${{ matrix.platform }}.zip" -Algorithm SHA256
+          "$($hash.Hash.ToLower())  ssh-mcp-server-${{ matrix.platform }}.zip" | Set-Content "dist-release/ssh-mcp-server-${{ matrix.platform }}.zip.sha256"
+
+      - name: Upload release artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ssh-mcp-server-java-${{ matrix.platform }}
+          path: java/dist-release/*
+          if-no-files-found: error
+
   publish:
     name: Publish GitHub release
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: build
+    needs: [go-build, java-jar, java-runtime]
     runs-on: ubuntu-latest
     permissions:
       contents: write

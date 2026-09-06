@@ -22,6 +22,8 @@ import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
+import java.net.InetAddress;
+import java.net.UnknownHostException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -32,21 +34,28 @@ import java.security.NoSuchAlgorithmException;
 import java.util.ArrayList;
 import java.util.Base64;
 import java.util.Collection;
-import java.util.Collections;
 import java.util.EnumSet;
-import java.util.HashMap;
-import java.util.LinkedHashMap;
+import java.util.HashSet;
+import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeoutException;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.Locale;
 
 final class SshService implements AutoCloseable {
     private final ObjectMapper mapper;
     private final Config.ServerCatalog catalog;
     private final Map<String, Tunnel> tunnels = new ConcurrentHashMap<String, Tunnel>();
+    private final AtomicBoolean closed = new AtomicBoolean();
 
     SshService(ObjectMapper mapper, Config.ServerCatalog catalog) {
         this.mapper = mapper;
@@ -56,7 +65,9 @@ final class SshService implements AutoCloseable {
     ObjectNode listServers() {
         ObjectNode result = mapper.createObjectNode();
         ArrayNode servers = result.putArray("servers");
-        for (Config.ServerConfig server : catalog.servers().values()) {
+        List<Config.ServerConfig> configuredServers = new ArrayList<Config.ServerConfig>(catalog.servers().values());
+        configuredServers.sort((left, right) -> left.id().compareTo(right.id()));
+        for (Config.ServerConfig server : configuredServers) {
             ObjectNode item = servers.addObject();
             item.put("id", server.id());
             item.put("host", server.host());
@@ -70,8 +81,14 @@ final class SshService implements AutoCloseable {
                 auth.add("password");
             }
             item.put("strictHostKeyChecking", server.strictHostKeyChecking());
+            item.put("effectiveHostKeyPolicy", Config.autoAcceptHostKeys() ? "auto-accept"
+                    : server.strictHostKeyChecking() ? "strict" : "disabled");
+            item.put("allowSftp", server.allowSftp());
+            item.put("allowPortForwarding", server.allowPortForwarding());
             item.put("sftpEnabled", server.allowSftp());
             item.put("portForwardingEnabled", server.allowPortForwarding());
+            item.put("maxConcurrentOperations", server.maxConcurrentOperations());
+            item.put("maxConcurrentTunnels", server.maxConcurrentTunnels());
         }
         result.put("secretsExposedToModel", false);
         return result;
@@ -79,6 +96,7 @@ final class SshService implements AutoCloseable {
 
     ToolResult call(String name, JsonNode arguments) {
         try {
+            validateArguments(name, arguments);
             if ("ssh_list_servers".equals(name)) {
                 return ToolResult.ok(listServers());
             }
@@ -126,6 +144,58 @@ final class SshService implements AutoCloseable {
         }
     }
 
+    private static void validateArguments(String name, JsonNode arguments) throws InvalidToolArguments {
+        String[] allowed;
+        if ("ssh_list_servers".equals(name) || "ssh_tunnel_list".equals(name)) {
+            allowed = new String[0];
+        }
+        else if ("ssh_exec".equals(name)) {
+            allowed = new String[] { "serverId", "command", "timeoutMs", "maxOutputBytes" };
+        }
+        else if ("sftp_list".equals(name)) {
+            allowed = new String[] { "serverId", "path", "maxEntries" };
+        }
+        else if ("sftp_stat".equals(name) || "sftp_mkdir".equals(name)) {
+            allowed = new String[] { "serverId", "path" };
+        }
+        else if ("sftp_read_file".equals(name)) {
+            allowed = new String[] { "serverId", "path", "maxBytes", "encoding" };
+        }
+        else if ("sftp_write_file".equals(name)) {
+            allowed = new String[] { "serverId", "path", "content", "contentBase64" };
+        }
+        else if ("sftp_delete".equals(name)) {
+            allowed = new String[] { "serverId", "path", "directory" };
+        }
+        else if ("ssh_tunnel_open".equals(name)) {
+            allowed = new String[] { "serverId", "localHost", "localPort", "remoteHost", "remotePort" };
+        }
+        else if ("ssh_tunnel_close".equals(name)) {
+            allowed = new String[] { "tunnelId" };
+        }
+        else {
+            return;
+        }
+
+        if (arguments == null || arguments.isNull()) {
+            if (allowed.length == 0) {
+                return;
+            }
+            throw new InvalidToolArguments("Tool arguments must be a JSON object");
+        }
+        if (!arguments.isObject()) {
+            throw new InvalidToolArguments("Tool arguments must be a JSON object");
+        }
+        Set<String> allowedFields = new HashSet<String>(java.util.Arrays.asList(allowed));
+        Iterator<String> fields = arguments.fieldNames();
+        while (fields.hasNext()) {
+            String field = fields.next();
+            if (!allowedFields.contains(field)) {
+                throw new InvalidToolArguments("Unknown tool argument: " + field);
+            }
+        }
+    }
+
     private ToolResult execute(JsonNode arguments) throws Exception {
         final Config.ServerConfig server = server(arguments);
         final String command = required(arguments, "command");
@@ -136,7 +206,7 @@ final class SshService implements AutoCloseable {
         final long timeout = timeout(arguments, server.commandTimeoutMs());
         final int requestedOutput = integer(arguments, "maxOutputBytes", server.maxOutputBytes(), 1024, server.maxOutputBytes());
         final long started = System.nanoTime();
-        return withConnection(server, new ConnectionOperation<ToolResult>() {
+        return withConnection(server, timeout, new ConnectionOperation<ToolResult>() {
             @Override
             public ToolResult run(Connection connection) throws Exception {
                 LimitedOutputStream stdout = new LimitedOutputStream(requestedOutput);
@@ -241,7 +311,7 @@ final class SshService implements AutoCloseable {
         final Config.ServerConfig server = sftpServer(arguments);
         final String path = required(arguments, "path");
         final int maxBytes = integer(arguments, "maxBytes", server.maxOutputBytes(), 1, server.maxOutputBytes());
-        final String encoding = optional(arguments, "encoding", "utf8");
+        final String encoding = optional(arguments, "encoding", "utf8").trim().toLowerCase(Locale.ROOT);
         if (!"utf8".equals(encoding) && !"base64".equals(encoding)) {
             throw new InvalidToolArguments("encoding must be 'utf8' or 'base64'");
         }
@@ -384,20 +454,23 @@ final class SshService implements AutoCloseable {
     }
 
     private ToolResult tunnelOpen(JsonNode arguments) throws Exception {
+        if (closed.get()) {
+            throw new OperationRejected("SSH service is closed");
+        }
         final Config.ServerConfig server = server(arguments);
         if (!server.allowPortForwarding()) {
             throw new OperationRejected("Port forwarding is disabled for server '" + server.id() + "'");
         }
-        final String localHost = optional(arguments, "localHost", "127.0.0.1");
-        if (!("127.0.0.1".equals(localHost) || "localhost".equalsIgnoreCase(localHost) || "::1".equals(localHost))) {
+        final String localHost = optional(arguments, "localHost", "127.0.0.1").trim();
+        if (!isLoopbackHost(localHost)) {
             throw new OperationRejected("For safety, localHost must be loopback");
         }
         final int localPort = integer(arguments, "localPort", 0, 0, 65535);
         final String remoteHost = required(arguments, "remoteHost");
         final int remotePort = integer(arguments, "remotePort", 0, 1, 65535);
-        boolean acquired = server.operationSlots().tryAcquire(server.connectTimeoutMs(), TimeUnit.MILLISECONDS);
+        boolean acquired = server.tunnelSlots().tryAcquire(server.connectTimeoutMs(), TimeUnit.MILLISECONDS);
         if (!acquired) {
-            throw new OperationRejected("Server operation limit reached");
+            throw new OperationRejected("Tunnel limit reached for this server: too many open tunnels");
         }
         Connection connection = null;
         try {
@@ -406,15 +479,22 @@ final class SshService implements AutoCloseable {
                     new SshdSocketAddress(localHost, localPort), new SshdSocketAddress(remoteHost, remotePort));
             String id = UUID.randomUUID().toString();
             Tunnel tunnel = new Tunnel(id, server, connection, tracker);
-            tunnels.put(id, tunnel);
+            SshdSocketAddress boundAddress = tracker.getBoundAddress();
             ObjectNode result = mapper.createObjectNode();
             result.put("tunnelId", id);
             result.put("serverId", server.id());
-            result.put("localHost", tracker.getBoundAddress().getHostName());
-            result.put("localPort", tracker.getBoundAddress().getPort());
+            result.put("localHost", boundAddress.getHostName());
+            result.put("localPort", boundAddress.getPort());
             result.put("remoteHost", remoteHost);
             result.put("remotePort", remotePort);
             result.put("warning", "The tunnel remains active until ssh_tunnel_close or process exit");
+            synchronized (tunnels) {
+                if (closed.get()) {
+                    tracker.close();
+                    throw new OperationRejected("SSH service is closed");
+                }
+                tunnels.put(id, tunnel);
+            }
             AuditLog.success("ssh_tunnel_open", server, 0, "tunnelId=" + id);
             return ToolResult.ok(result);
         }
@@ -422,7 +502,7 @@ final class SshService implements AutoCloseable {
             if (connection != null) {
                 connection.close();
             }
-            server.operationSlots().release();
+            server.tunnelSlots().release();
             throw ex;
         }
     }
@@ -443,7 +523,15 @@ final class SshService implements AutoCloseable {
     private ToolResult tunnelList() {
         ObjectNode result = mapper.createObjectNode();
         ArrayNode items = result.putArray("tunnels");
-        for (Tunnel tunnel : tunnels.values()) {
+        List<Tunnel> activeTunnels = new ArrayList<Tunnel>(tunnels.values());
+        activeTunnels.sort((left, right) -> left.id.compareTo(right.id));
+        for (Tunnel tunnel : activeTunnels) {
+            if (!tunnel.tracker.isOpen()) {
+                if (tunnels.remove(tunnel.id, tunnel)) {
+                    tunnel.close();
+                }
+                continue;
+            }
             ObjectNode item = items.addObject();
             item.put("tunnelId", tunnel.id);
             item.put("serverId", tunnel.server.id());
@@ -472,6 +560,14 @@ final class SshService implements AutoCloseable {
     }
 
     private <T> T withConnection(Config.ServerConfig server, ConnectionOperation<T> operation) throws Exception {
+        return withConnection(server, server.commandTimeoutMs(), operation);
+    }
+
+    private <T> T withConnection(Config.ServerConfig server, long operationTimeoutMs,
+            ConnectionOperation<T> operation) throws Exception {
+        if (closed.get()) {
+            throw new OperationRejected("SSH service is closed");
+        }
         boolean acquired = server.operationSlots().tryAcquire(server.connectTimeoutMs() + server.commandTimeoutMs(),
                 TimeUnit.MILLISECONDS);
         if (!acquired) {
@@ -479,11 +575,42 @@ final class SshService implements AutoCloseable {
         }
         long started = System.nanoTime();
         Connection connection = null;
+        ExecutorService executor = null;
         try {
             connection = openConnection(server);
-            return operation.run(connection);
+            if (closed.get()) {
+                throw new OperationRejected("SSH service is closed");
+            }
+            final Connection activeConnection = connection;
+            executor = Executors.newSingleThreadExecutor(runnable -> {
+                Thread thread = new Thread(runnable, "ssh-mcp-operation");
+                thread.setDaemon(true);
+                return thread;
+            });
+            Future<T> future = executor.submit(() -> operation.run(activeConnection));
+            try {
+                return future.get(operationTimeoutMs, TimeUnit.MILLISECONDS);
+            }
+            catch (TimeoutException ex) {
+                future.cancel(true);
+                activeConnection.close();
+                throw new OperationRejected("SSH operation timed out");
+            }
+            catch (ExecutionException ex) {
+                Throwable cause = ex.getCause();
+                if (cause instanceof Exception) {
+                    throw (Exception) cause;
+                }
+                if (cause instanceof Error) {
+                    throw (Error) cause;
+                }
+                throw new IOException("SSH operation failed", cause);
+            }
         }
         finally {
+            if (executor != null) {
+                executor.shutdownNow();
+            }
             if (connection != null) {
                 connection.close();
             }
@@ -494,7 +621,7 @@ final class SshService implements AutoCloseable {
 
     private Connection openConnection(Config.ServerConfig server) throws Exception {
         SshClient client = SshClient.setUpDefaultClient();
-        if (server.strictHostKeyChecking()) {
+        if (server.strictHostKeyChecking() && !Config.autoAcceptHostKeys()) {
             client.setServerKeyVerifier(new DefaultKnownHostsServerKeyVerifier(
                     RejectAllServerKeyVerifier.INSTANCE, true, server.knownHostsPath()));
         }
@@ -547,20 +674,51 @@ final class SshService implements AutoCloseable {
         return value;
     }
 
-    private static void checkCommandPolicy(Config.ServerConfig server, String command) throws OperationRejected {
+    static void checkCommandPolicy(Config.ServerConfig server, String command) throws OperationRejected {
         for (java.util.regex.Pattern pattern : server.deniedCommandPatterns()) {
-            if (pattern.matcher(command).matches()) {
+            if (pattern.matcher(command).find()) {
                 throw new OperationRejected("Command rejected by the server command policy");
             }
         }
         if (!server.allowedCommandPrefixes().isEmpty()) {
+            if (hasShellOperators(command)) {
+                throw new OperationRejected("Command contains shell operators that are not allowed with an allowlist");
+            }
             String trimmed = command.trim();
             for (String prefix : server.allowedCommandPrefixes()) {
-                if (trimmed.startsWith(prefix)) {
+                if (trimmed.equals(prefix)
+                        || (trimmed.startsWith(prefix) && trimmed.length() > prefix.length()
+                        && Character.isWhitespace(trimmed.charAt(prefix.length())))) {
                     return;
                 }
             }
             throw new OperationRejected("Command is not allowed by the server command policy");
+        }
+    }
+
+    private static boolean hasShellOperators(String command) {
+        for (int i = 0; i < command.length(); i++) {
+            char value = command.charAt(i);
+            if (value == 0 || value == '\n' || value == '\r'
+                    || ";|&<>$`(){}'\"\\".indexOf(value) >= 0) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private static boolean isLoopbackHost(String host) {
+        if ("localhost".equalsIgnoreCase(host)) {
+            return true;
+        }
+        if (!host.matches("[0-9a-fA-F:.]+")) {
+            return false;
+        }
+        try {
+            return InetAddress.getByName(host).isLoopbackAddress();
+        }
+        catch (UnknownHostException ex) {
+            return false;
         }
     }
 
@@ -572,7 +730,7 @@ final class SshService implements AutoCloseable {
         node.put("size", attributes.getSize());
         node.put("type", attributes.isDirectory() ? "directory"
                 : attributes.isRegularFile() ? "file" : attributes.isSymbolicLink() ? "symlink" : "other");
-        node.put("permissions", attributes.getPermissions());
+        node.put("permissions", Integer.toOctalString(attributes.getPermissions() & 07777));
         if (attributes.getOwner() != null) {
             node.put("owner", attributes.getOwner());
         }
@@ -600,7 +758,7 @@ final class SshService implements AutoCloseable {
         if (value == null || !value.isTextual() || value.asText().trim().isEmpty()) {
             throw new InvalidToolArguments(name + " is required");
         }
-        return value.asText();
+        return value.asText().trim();
     }
 
     private static String optional(JsonNode arguments, String name, String defaultValue) throws InvalidToolArguments {
@@ -634,7 +792,7 @@ final class SshService implements AutoCloseable {
         if (value == null || value.isNull()) {
             return defaultValue;
         }
-        if (!value.canConvertToInt()) {
+        if (!value.isIntegralNumber() || !value.canConvertToInt()) {
             throw new InvalidToolArguments(name + " must be an integer");
         }
         int result = value.asInt();
@@ -675,10 +833,15 @@ final class SshService implements AutoCloseable {
 
     @Override
     public void close() {
-        for (String id : new ArrayList<String>(tunnels.keySet())) {
-            Tunnel tunnel = tunnels.remove(id);
-            if (tunnel != null) {
-                tunnel.close();
+        if (!closed.compareAndSet(false, true)) {
+            return;
+        }
+        synchronized (tunnels) {
+            for (String id : new ArrayList<String>(tunnels.keySet())) {
+                Tunnel tunnel = tunnels.remove(id);
+                if (tunnel != null) {
+                    tunnel.close();
+                }
             }
         }
     }
@@ -715,6 +878,7 @@ final class SshService implements AutoCloseable {
     private static final class Connection implements AutoCloseable {
         private final SshClient client;
         private final ClientSession session;
+        private final AtomicBoolean closed = new AtomicBoolean();
 
         private Connection(SshClient client, ClientSession session) {
             this.client = client;
@@ -723,6 +887,9 @@ final class SshService implements AutoCloseable {
 
         @Override
         public void close() {
+            if (!closed.compareAndSet(false, true)) {
+                return;
+            }
             try {
                 session.close(false).await(5000L);
             }
@@ -743,6 +910,7 @@ final class SshService implements AutoCloseable {
         private final Config.ServerConfig server;
         private final Connection connection;
         private final ExplicitPortForwardingTracker tracker;
+        private final AtomicBoolean closed = new AtomicBoolean();
 
         private Tunnel(String id, Config.ServerConfig server, Connection connection,
                 ExplicitPortForwardingTracker tracker) {
@@ -753,6 +921,9 @@ final class SshService implements AutoCloseable {
         }
 
         private void close() {
+            if (!closed.compareAndSet(false, true)) {
+                return;
+            }
             try {
                 tracker.close();
             }
@@ -760,7 +931,7 @@ final class SshService implements AutoCloseable {
                 // Cleanup is best effort.
             }
             connection.close();
-            server.operationSlots().release();
+            server.tunnelSlots().release();
         }
     }
 

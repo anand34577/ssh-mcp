@@ -100,5 +100,5 @@ jobs:
           java-version: '11'
           cache: maven
 
-      - name: Run Maven tests
-        run: mvn -B -ntp test
+      - name: Run Maven verification and package checks
+        run: mvn -B -ntp verify

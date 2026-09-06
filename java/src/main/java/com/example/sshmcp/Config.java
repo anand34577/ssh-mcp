@@ -2,14 +2,15 @@ package com.example.sshmcp;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.core.JsonParser;
 
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Collections;
-import java.util.HashMap;
 import java.util.HashSet;
 import java.util.Iterator;
 import java.util.LinkedHashMap;
@@ -21,7 +22,20 @@ import java.util.regex.Pattern;
 import java.util.regex.PatternSyntaxException;
 
 final class Config {
+    private static final String AUTO_ACCEPT_HOST_KEYS_ENV = "SSH_MCP_AUTO_ACCEPT_HOST_KEYS";
+    private static final Set<String> ALLOWED_ROOT_FIELDS = new HashSet<String>(Collections.singleton("servers"));
+    private static final Set<String> ALLOWED_SERVER_FIELDS = new HashSet<String>(Arrays.asList(
+            "id", "host", "port", "username", "passwordEnv", "privateKeyPath",
+            "privateKeyPassphraseEnv", "knownHostsPath", "strictHostKeyChecking",
+            "connectTimeoutMs", "commandTimeoutMs", "maxOutputBytes",
+            "maxConcurrentOperations", "maxConcurrentTunnels", "allowSftp", "allowPortForwarding",
+            "allowedCommandPrefixes", "deniedCommandRegexes"));
+
     private Config() {
+    }
+
+    static boolean autoAcceptHostKeys() {
+        return "true".equalsIgnoreCase(System.getenv(AUTO_ACCEPT_HOST_KEYS_ENV));
     }
 
     static ServerCatalog load(ObjectMapper mapper) throws IOException {
@@ -40,11 +54,22 @@ final class Config {
         }
 
         JsonNode root;
-        try (java.io.Reader reader = Files.newBufferedReader(path)) {
-            root = mapper.readTree(reader);
+        try (java.io.Reader reader = Files.newBufferedReader(path);
+                JsonParser parser = mapper.getFactory().createParser(reader)) {
+            root = mapper.readTree(parser);
+            if (parser.nextToken() != null) {
+                throw new IOException("Configuration contains trailing JSON data");
+            }
         }
         if (root == null || !root.isObject() || !root.has("servers") || !root.get("servers").isArray()) {
             throw new IOException("Configuration must contain a JSON array named 'servers'");
+        }
+        Iterator<String> rootFields = root.fieldNames();
+        while (rootFields.hasNext()) {
+            String field = rootFields.next();
+            if (!ALLOWED_ROOT_FIELDS.contains(field)) {
+                throw new IOException("Unknown configuration field: " + field);
+            }
         }
 
         Map<String, ServerConfig> servers = new LinkedHashMap<String, ServerConfig>();
@@ -119,7 +144,10 @@ final class Config {
         private final long connectTimeoutMs;
         private final long commandTimeoutMs;
         private final int maxOutputBytes;
+        private final int maxConcurrentOperations;
+        private final int maxConcurrentTunnels;
         private final Semaphore operationSlots;
+        private final Semaphore tunnelSlots;
         private final boolean allowSftp;
         private final boolean allowPortForwarding;
         private final List<String> allowedCommandPrefixes;
@@ -128,7 +156,7 @@ final class Config {
         private ServerConfig(String id, String host, int port, String username, String passwordEnv,
                 String privateKeyPath, String privateKeyPassphraseEnv, Path knownHostsPath,
                 boolean strictHostKeyChecking, long connectTimeoutMs, long commandTimeoutMs,
-                int maxOutputBytes, int maxConcurrentOperations, boolean allowSftp,
+                int maxOutputBytes, int maxConcurrentOperations, int maxConcurrentTunnels, boolean allowSftp,
                 boolean allowPortForwarding, List<String> allowedCommandPrefixes,
                 List<Pattern> deniedCommandPatterns) {
             this.id = id;
@@ -143,7 +171,10 @@ final class Config {
             this.connectTimeoutMs = connectTimeoutMs;
             this.commandTimeoutMs = commandTimeoutMs;
             this.maxOutputBytes = maxOutputBytes;
+            this.maxConcurrentOperations = maxConcurrentOperations;
+            this.maxConcurrentTunnels = maxConcurrentTunnels;
             this.operationSlots = new Semaphore(maxConcurrentOperations, true);
+            this.tunnelSlots = new Semaphore(maxConcurrentTunnels, true);
             this.allowSftp = allowSftp;
             this.allowPortForwarding = allowPortForwarding;
             this.allowedCommandPrefixes = Collections.unmodifiableList(allowedCommandPrefixes);
@@ -154,7 +185,7 @@ final class Config {
             if (node == null || !node.isObject()) {
                 throw new IOException("Each server entry must be a JSON object");
             }
-            rejectSecretFields(node);
+            validateFields(node);
             String id = required(node, "id");
             if (!id.matches("[A-Za-z0-9._-]{1,64}")) {
                 throw new IOException("Server id must contain only letters, numbers, '.', '_' or '-': " + id);
@@ -178,14 +209,15 @@ final class Config {
 
             boolean strict = bool(node, "strictHostKeyChecking", true);
             String knownHosts = optional(node, "knownHostsPath");
-            if (strict && knownHosts == null) {
+            boolean autoAcceptHostKeys = autoAcceptHostKeys();
+            if (strict && knownHosts == null && !autoAcceptHostKeys) {
                 throw new IOException("Server '" + id + "' must configure knownHostsPath when strictHostKeyChecking is true");
             }
-            if (!strict && !"true".equalsIgnoreCase(System.getenv("SSH_MCP_ALLOW_INSECURE_HOST_KEYS"))) {
+            if (!strict && !"true".equalsIgnoreCase(System.getenv("SSH_MCP_ALLOW_INSECURE_HOST_KEYS")) && !autoAcceptHostKeys) {
                 throw new IOException("Server '" + id + "' disables host-key checking. Set SSH_MCP_ALLOW_INSECURE_HOST_KEYS=true only for an explicit exception.");
             }
             Path knownHostsPath = knownHosts == null ? null : Paths.get(expand(knownHosts)).toAbsolutePath().normalize();
-            if (strict && !Files.isRegularFile(knownHostsPath)) {
+            if (strict && !autoAcceptHostKeys && !Files.isRegularFile(knownHostsPath)) {
                 throw new IOException("Server '" + id + "' knownHostsPath is not a regular file: " + knownHostsPath);
             }
 
@@ -193,6 +225,7 @@ final class Config {
             long commandTimeout = longValue(node, "commandTimeoutMs", 60000L, 100L, 3600000L);
             int maxOutput = integer(node, "maxOutputBytes", 1048576, 1024, 104857600);
             int maxConcurrent = integer(node, "maxConcurrentOperations", 4, 1, 64);
+            int maxConcurrentTunnels = integer(node, "maxConcurrentTunnels", 4, 1, 64);
             boolean allowSftp = bool(node, "allowSftp", true);
             boolean allowForwarding = bool(node, "allowPortForwarding", false);
 
@@ -207,16 +240,31 @@ final class Config {
                 }
             }
 
+            for (int i = 0; i < prefixes.size(); i++) {
+                String prefix = prefixes.get(i).trim();
+                if (prefix.isEmpty()) {
+                    throw new IOException("Server '" + id + "' has an empty allowed command prefix");
+                }
+                prefixes.set(i, prefix);
+            }
+
             return new ServerConfig(id, host, port, username, passwordEnv, privateKeyPath,
                     privateKeyPassphraseEnv, knownHostsPath, strict, connectTimeout, commandTimeout,
-                    maxOutput, maxConcurrent, allowSftp, allowForwarding, prefixes, denied);
+                    maxOutput, maxConcurrent, maxConcurrentTunnels, allowSftp, allowForwarding, prefixes, denied);
         }
 
-        private static void rejectSecretFields(JsonNode node) throws IOException {
+        private static void validateFields(JsonNode node) throws IOException {
             String[] forbidden = { "password", "passphrase", "privateKey", "privateKeyContent", "secret" };
-            for (String field : forbidden) {
-                if (node.has(field)) {
-                    throw new IOException("Secrets must not be stored directly in configuration; use an environment variable reference for '" + field + "'");
+            Iterator<String> fields = node.fieldNames();
+            while (fields.hasNext()) {
+                String field = fields.next();
+                for (String forbiddenField : forbidden) {
+                    if (field.equalsIgnoreCase(forbiddenField)) {
+                        throw new IOException("Secrets must not be stored directly in configuration; use an environment variable reference for '" + field + "'");
+                    }
+                }
+                if (!ALLOWED_SERVER_FIELDS.contains(field)) {
+                    throw new IOException("Unknown server field: " + field);
                 }
             }
         }
@@ -256,7 +304,7 @@ final class Config {
             if (value == null || value.isNull()) {
                 return defaultValue;
             }
-            if (!value.canConvertToInt()) {
+            if (!value.isIntegralNumber() || !value.canConvertToInt()) {
                 throw new IOException("Server field '" + name + "' must be an integer");
             }
             int result = value.asInt();
@@ -294,7 +342,7 @@ final class Config {
                 if (!item.isTextual() || item.asText().trim().isEmpty()) {
                     throw new IOException("Server field '" + name + "' must contain non-empty strings");
                 }
-                result.add(item.asText());
+                result.add(item.asText().trim());
             }
             return result;
         }
@@ -312,6 +360,9 @@ final class Config {
         long commandTimeoutMs() { return commandTimeoutMs; }
         int maxOutputBytes() { return maxOutputBytes; }
         Semaphore operationSlots() { return operationSlots; }
+        Semaphore tunnelSlots() { return tunnelSlots; }
+        int maxConcurrentOperations() { return maxConcurrentOperations; }
+        int maxConcurrentTunnels() { return maxConcurrentTunnels; }
         boolean allowSftp() { return allowSftp; }
         boolean allowPortForwarding() { return allowPortForwarding; }
         List<String> allowedCommandPrefixes() { return allowedCommandPrefixes; }

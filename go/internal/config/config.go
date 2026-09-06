@@ -28,14 +28,34 @@ type ServerConfig struct {
 	CommandTimeoutMs        int64    `json:"commandTimeoutMs"`
 	MaxOutputBytes          int      `json:"maxOutputBytes"`
 	MaxConcurrentOperations int      `json:"maxConcurrentOperations"`
+	MaxConcurrentTunnels    int      `json:"maxConcurrentTunnels"`
 	AllowSFTP               bool     `json:"allowSftp"`
 	AllowPortForwarding     bool     `json:"allowPortForwarding"`
 	AllowedCommandPrefixes  []string `json:"allowedCommandPrefixes"`
 	DeniedCommandRegexes    []string `json:"deniedCommandRegexes"`
 
 	DeniedPatterns []*regexp.Regexp `json:"-"`
-	Slots          chan struct{}    `json:"-"`
+	// Slots bounds concurrent short-lived operations (ssh_exec, sftp_*).
+	Slots chan struct{} `json:"-"`
+	// TunnelSlots bounds concurrent long-lived port forwards separately from
+	// Slots, so open tunnels cannot starve exec/SFTP operations on the same
+	// server (and vice versa).
+	TunnelSlots chan struct{} `json:"-"`
 }
+
+var allowedServerFields = map[string]struct{}{
+	"id": {}, "host": {}, "port": {}, "username": {}, "passwordEnv": {},
+	"privateKeyPath": {}, "privateKeyPassphraseEnv": {}, "knownHostsPath": {},
+	"strictHostKeyChecking": {}, "connectTimeoutMs": {}, "commandTimeoutMs": {},
+	"maxOutputBytes": {}, "maxConcurrentOperations": {}, "maxConcurrentTunnels": {}, "allowSftp": {},
+	"allowPortForwarding": {}, "allowedCommandPrefixes": {}, "deniedCommandRegexes": {},
+}
+
+var allowedRootFields = map[string]struct{}{
+	"servers": {},
+}
+
+const autoAcceptHostKeysEnv = "SSH_MCP_AUTO_ACCEPT_HOST_KEYS"
 
 func Load(path string) (*Catalog, error) {
 	if strings.TrimSpace(path) == "" {
@@ -50,18 +70,27 @@ func Load(path string) (*Catalog, error) {
 		return nil, fmt.Errorf("configuration file %s: %w", path, err)
 	}
 
-	var root struct {
-		Servers []json.RawMessage `json:"servers"`
-	}
-	if err := json.Unmarshal(data, &root); err != nil {
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(data, &fields); err != nil {
 		return nil, fmt.Errorf("parse configuration: %w", err)
 	}
-	if root.Servers == nil || len(root.Servers) == 0 {
+	for field := range fields {
+		if _, ok := allowedRootFields[field]; !ok {
+			return nil, fmt.Errorf("configuration contains unknown field %q", field)
+		}
+	}
+	var servers []json.RawMessage
+	if raw, ok := fields["servers"]; ok {
+		if err := json.Unmarshal(raw, &servers); err != nil {
+			return nil, fmt.Errorf("configuration servers must be an array: %w", err)
+		}
+	}
+	if len(servers) == 0 {
 		return nil, fmt.Errorf("configuration must contain at least one server")
 	}
 
-	catalog := &Catalog{Source: path, Servers: make(map[string]*ServerConfig, len(root.Servers))}
-	for _, raw := range root.Servers {
+	catalog := &Catalog{Source: path, Servers: make(map[string]*ServerConfig, len(servers))}
+	for _, raw := range servers {
 		server, err := parseServer(raw)
 		if err != nil {
 			return nil, err
@@ -84,6 +113,9 @@ func parseServer(raw json.RawMessage) (*ServerConfig, error) {
 			if strings.EqualFold(field, forbidden) {
 				return nil, fmt.Errorf("secrets must not be stored directly in configuration; use an environment variable reference for %q", field)
 			}
+		}
+		if _, ok := allowedServerFields[field]; !ok {
+			return nil, fmt.Errorf("server entry contains unknown field %q", field)
 		}
 	}
 
@@ -121,18 +153,19 @@ func parseServer(raw json.RawMessage) (*ServerConfig, error) {
 		return nil, fmt.Errorf("server %q has an invalid privateKeyPassphraseEnv name", server.ID)
 	}
 
-	if _, present := fields["strictHostKeyChecking"]; !present {
+	if !hasNonNullField(fields, "strictHostKeyChecking") {
 		server.StrictHostKeyChecking = true
 	}
-	if server.StrictHostKeyChecking && server.KnownHostsPath == "" {
+	autoAcceptHostKeys := AutoAcceptHostKeys()
+	if server.StrictHostKeyChecking && server.KnownHostsPath == "" && !autoAcceptHostKeys {
 		return nil, fmt.Errorf("server %q must configure knownHostsPath when strictHostKeyChecking is true", server.ID)
 	}
-	if !server.StrictHostKeyChecking && !strings.EqualFold(os.Getenv("SSH_MCP_ALLOW_INSECURE_HOST_KEYS"), "true") {
+	if !server.StrictHostKeyChecking && !strings.EqualFold(os.Getenv("SSH_MCP_ALLOW_INSECURE_HOST_KEYS"), "true") && !autoAcceptHostKeys {
 		return nil, fmt.Errorf("server %q disables host-key checking; set SSH_MCP_ALLOW_INSECURE_HOST_KEYS=true only for an explicit exception", server.ID)
 	}
 	server.PrivateKeyPath = Expand(server.PrivateKeyPath)
 	server.KnownHostsPath = Expand(server.KnownHostsPath)
-	if server.StrictHostKeyChecking {
+	if server.StrictHostKeyChecking && !autoAcceptHostKeys {
 		info, err := os.Stat(server.KnownHostsPath)
 		if err != nil || !info.Mode().IsRegular() {
 			return nil, fmt.Errorf("server %q knownHostsPath is not a regular file: %s", server.ID, server.KnownHostsPath)
@@ -163,7 +196,13 @@ func parseServer(raw json.RawMessage) (*ServerConfig, error) {
 	if server.MaxConcurrentOperations < 1 || server.MaxConcurrentOperations > 64 {
 		return nil, fmt.Errorf("server %q maxConcurrentOperations must be between 1 and 64", server.ID)
 	}
-	if _, present := fields["allowSftp"]; !present {
+	if server.MaxConcurrentTunnels == 0 {
+		server.MaxConcurrentTunnels = 4
+	}
+	if server.MaxConcurrentTunnels < 1 || server.MaxConcurrentTunnels > 64 {
+		return nil, fmt.Errorf("server %q maxConcurrentTunnels must be between 1 and 64", server.ID)
+	}
+	if !hasNonNullField(fields, "allowSftp") {
 		server.AllowSFTP = true
 	}
 
@@ -174,8 +213,25 @@ func parseServer(raw json.RawMessage) (*ServerConfig, error) {
 		}
 		server.DeniedPatterns = append(server.DeniedPatterns, compiled)
 	}
+	for i, prefix := range server.AllowedCommandPrefixes {
+		prefix = strings.TrimSpace(prefix)
+		if prefix == "" {
+			return nil, fmt.Errorf("server %q allowedCommandPrefixes[%d] must be non-empty", server.ID, i)
+		}
+		server.AllowedCommandPrefixes[i] = prefix
+	}
 	server.Slots = make(chan struct{}, server.MaxConcurrentOperations)
+	server.TunnelSlots = make(chan struct{}, server.MaxConcurrentTunnels)
 	return &server, nil
+}
+
+func AutoAcceptHostKeys() bool {
+	return strings.EqualFold(os.Getenv(autoAcceptHostKeysEnv), "true")
+}
+
+func hasNonNullField(fields map[string]json.RawMessage, name string) bool {
+	raw, present := fields[name]
+	return present && strings.TrimSpace(string(raw)) != "null"
 }
 
 func Expand(value string) string {

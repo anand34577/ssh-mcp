@@ -13,6 +13,7 @@
       "commandTimeoutMs": 60000,
       "maxOutputBytes": 1048576,
       "maxConcurrentOperations": 4,
+      "maxConcurrentTunnels": 4,
       "allowSftp": true,
       "allowPortForwarding": false,
       "allowedCommandPrefixes": [],

@@ -13,11 +13,13 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
+	"unicode"
 	"unicode/utf8"
 
 	"example.com/ssh-mcp-server/internal/config"
@@ -87,11 +89,13 @@ type TunnelOpenRequest struct {
 }
 
 type Tunnel struct {
-	id        string
-	server    *config.ServerConfig
-	client    *ssh.Client
-	listener  net.Listener
-	closeOnce sync.Once
+	id          string
+	server      *config.ServerConfig
+	client      *ssh.Client
+	listener    net.Listener
+	service     *Service
+	connections chan struct{}
+	closeOnce   sync.Once
 }
 
 func New(catalog *config.Catalog) *Service {
@@ -100,15 +104,40 @@ func New(catalog *config.Catalog) *Service {
 
 func (s *Service) ListServers() []map[string]any {
 	items := make([]map[string]any, 0, len(s.catalog.Servers))
+	servers := make([]*config.ServerConfig, 0, len(s.catalog.Servers))
 	for _, server := range s.catalog.Servers {
+		servers = append(servers, server)
+	}
+	sort.Slice(servers, func(i, j int) bool { return servers[i].ID < servers[j].ID })
+	for _, server := range servers {
+		authMethods := make([]string, 0, 2)
+		if server.PrivateKeyPath != "" {
+			authMethods = append(authMethods, "publicKey")
+		}
+		if server.PasswordEnv != "" {
+			authMethods = append(authMethods, "password")
+		}
+		hostKeyPolicy := "strict"
+		if !server.StrictHostKeyChecking {
+			hostKeyPolicy = "disabled"
+		}
+		if config.AutoAcceptHostKeys() {
+			hostKeyPolicy = "auto-accept"
+		}
 		items = append(items, map[string]any{
-			"id":                    server.ID,
-			"host":                  server.Host,
-			"port":                  server.Port,
-			"username":              server.Username,
-			"strictHostKeyChecking": server.StrictHostKeyChecking,
-			"allowSftp":             server.AllowSFTP,
-			"allowPortForwarding":   server.AllowPortForwarding,
+			"id":                      server.ID,
+			"host":                    server.Host,
+			"port":                    server.Port,
+			"username":                server.Username,
+			"configuredAuthMethods":   authMethods,
+			"strictHostKeyChecking":   server.StrictHostKeyChecking,
+			"effectiveHostKeyPolicy":  hostKeyPolicy,
+			"allowSftp":               server.AllowSFTP,
+			"allowPortForwarding":     server.AllowPortForwarding,
+			"sftpEnabled":             server.AllowSFTP,
+			"portForwardingEnabled":   server.AllowPortForwarding,
+			"maxConcurrentOperations": server.MaxConcurrentOperations,
+			"maxConcurrentTunnels":    server.MaxConcurrentTunnels,
 		})
 	}
 	return items
@@ -173,8 +202,13 @@ func (s *Service) Exec(ctx context.Context, request ExecRequest) (map[string]any
 		}
 
 		exitCode := any(nil)
+		exitSignal := ""
 		if exitErr, ok := waitErr.(*ssh.ExitError); ok {
-			exitCode = exitErr.ExitStatus()
+			if exitErr.Signal() != "" {
+				exitSignal = exitErr.Signal()
+			} else {
+				exitCode = exitErr.ExitStatus()
+			}
 		} else if waitErr == nil {
 			exitCode = 0
 		} else if !timedOut {
@@ -186,7 +220,7 @@ func (s *Service) Exec(ctx context.Context, request ExecRequest) (map[string]any
 			"stdout":          stdout.String(),
 			"stderr":          stderr.String(),
 			"exitCode":        exitCode,
-			"exitSignal":      "",
+			"exitSignal":      exitSignal,
 			"timedOut":        timedOut,
 			"stdoutTruncated": stdout.truncated,
 			"stderrTruncated": stderr.truncated,
@@ -220,7 +254,7 @@ func (s *Service) SFTPList(ctx context.Context, request SFTPListRequest) (map[st
 	defer cancel()
 
 	return s.withSFTP(operationCtx, server, "sftp_list", func(client *sftp.Client) (map[string]any, error) {
-		entries, err := client.ReadDir(path)
+		entries, err := client.ReadDirContext(operationCtx, path)
 		if err != nil {
 			return nil, err
 		}
@@ -343,8 +377,12 @@ func (s *Service) SFTPWrite(ctx context.Context, request SFTPWriteRequest) (map[
 			return nil, err
 		}
 		defer file.Close()
-		if _, err := file.Write(data); err != nil {
+		written, err := file.Write(data)
+		if err != nil {
 			return nil, err
+		}
+		if written != len(data) {
+			return nil, io.ErrShortWrite
 		}
 		return map[string]any{"serverId": server.ID, "path": path, "bytesWritten": len(data)}, nil
 	})
@@ -421,29 +459,48 @@ func (s *Service) OpenTunnel(ctx context.Context, request TunnelOpenRequest) (ma
 	if request.RemotePort < 1 || request.RemotePort > 65535 {
 		return nil, errors.New("remotePort must be between 1 and 65535")
 	}
-	if err := acquire(ctx, server); err != nil {
+	acquireCtx, cancelAcquire := context.WithTimeout(ctx, time.Duration(server.ConnectTimeoutMs)*time.Millisecond)
+	defer cancelAcquire()
+	if err := acquireTunnel(acquireCtx, server); err != nil {
+		if errors.Is(err, context.DeadlineExceeded) {
+			return nil, errors.New("tunnel limit reached for this server: too many open tunnels")
+		}
 		return nil, err
 	}
 	client, err := s.connect(ctx, server)
 	if err != nil {
-		release(server)
+		releaseTunnel(server)
 		return nil, safeOperationError("SSH tunnel connection", err)
 	}
 	if s.closed.Load() {
 		_ = client.Close()
-		release(server)
+		releaseTunnel(server)
 		return nil, errors.New("SSH service is closed")
 	}
 	listener, err := client.Listen("tcp", net.JoinHostPort(localHost, strconv.Itoa(request.LocalPort)))
 	if err != nil {
 		_ = client.Close()
-		release(server)
+		releaseTunnel(server)
 		return nil, safeOperationError("SSH tunnel listener", err)
 	}
 
 	id := fmt.Sprintf("tunnel-%d", s.nextTunnel.Add(1))
-	tunnel := &Tunnel{id: id, server: server, client: client, listener: listener}
+	tunnel := &Tunnel{
+		id:          id,
+		server:      server,
+		client:      client,
+		listener:    listener,
+		service:     s,
+		connections: make(chan struct{}, 64),
+	}
 	s.mu.Lock()
+	if s.closed.Load() {
+		s.mu.Unlock()
+		_ = listener.Close()
+		_ = client.Close()
+		release(server)
+		return nil, errors.New("SSH service is closed")
+	}
 	s.tunnels[id] = tunnel
 	s.mu.Unlock()
 	go tunnel.acceptLoop(remoteHost, request.RemotePort)
@@ -486,8 +543,13 @@ func (s *Service) CloseTunnel(_ context.Context, id string) (map[string]any, err
 func (s *Service) ListTunnels() []map[string]any {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	items := make([]map[string]any, 0, len(s.tunnels))
+	tunnels := make([]*Tunnel, 0, len(s.tunnels))
 	for _, tunnel := range s.tunnels {
+		tunnels = append(tunnels, tunnel)
+	}
+	sort.Slice(tunnels, func(i, j int) bool { return tunnels[i].id < tunnels[j].id })
+	items := make([]map[string]any, 0, len(tunnels))
+	for _, tunnel := range tunnels {
 		localHost := ""
 		localPort := 0
 		if address, ok := tunnel.listener.Addr().(*net.TCPAddr); ok {
@@ -525,18 +587,30 @@ func (t *Tunnel) Close() {
 	t.closeOnce.Do(func() {
 		_ = t.listener.Close()
 		_ = t.client.Close()
-		release(t.server)
+		releaseTunnel(t.server)
 	})
 }
 
 func (t *Tunnel) acceptLoop(remoteHost string, remotePort int) {
+	defer func() {
+		t.service.removeTunnel(t.id, t)
+		t.Close()
+	}()
 	remoteAddress := net.JoinHostPort(remoteHost, strconv.Itoa(remotePort))
 	for {
 		local, err := t.listener.Accept()
 		if err != nil {
 			return
 		}
-		go t.proxy(local, remoteAddress)
+		select {
+		case t.connections <- struct{}{}:
+			go func() {
+				defer func() { <-t.connections }()
+				t.proxy(local, remoteAddress)
+			}()
+		default:
+			_ = local.Close()
+		}
 	}
 }
 
@@ -547,11 +621,26 @@ func (t *Tunnel) proxy(local net.Conn, remoteAddress string) {
 		return
 	}
 	done := make(chan struct{}, 2)
-	go func() { _, _ = io.Copy(remote, local); _ = remote.Close(); done <- struct{}{} }()
-	go func() { _, _ = io.Copy(local, remote); _ = local.Close(); done <- struct{}{} }()
+	go func() { _, _ = io.Copy(remote, local); closeWrite(remote); done <- struct{}{} }()
+	go func() { _, _ = io.Copy(local, remote); closeWrite(local); done <- struct{}{} }()
+	<-done
 	<-done
 	_ = local.Close()
 	_ = remote.Close()
+}
+
+func (s *Service) removeTunnel(id string, expected *Tunnel) {
+	s.mu.Lock()
+	if s.tunnels[id] == expected {
+		delete(s.tunnels, id)
+	}
+	s.mu.Unlock()
+}
+
+func closeWrite(conn net.Conn) {
+	if writer, ok := conn.(interface{ CloseWrite() error }); ok {
+		_ = writer.CloseWrite()
+	}
 }
 
 func (s *Service) withSFTP(ctx context.Context, server *config.ServerConfig, operation string, fn func(*sftp.Client) (map[string]any, error)) (map[string]any, error) {
@@ -580,14 +669,28 @@ func (s *Service) withClient(ctx context.Context, server *config.ServerConfig, o
 		return nil, err
 	}
 	defer client.Close()
+	stopWatch := watchContext(ctx, client)
+	defer stopWatch()
 	result, err := fn(client)
 	audit(operation, server, started, err == nil, "")
 	return result, err
 }
 
+func watchContext(ctx context.Context, client *ssh.Client) func() {
+	stop := make(chan struct{})
+	go func() {
+		select {
+		case <-ctx.Done():
+			_ = client.Close()
+		case <-stop:
+		}
+	}()
+	return func() { close(stop) }
+}
+
 func (s *Service) connect(ctx context.Context, server *config.ServerConfig) (*ssh.Client, error) {
 	var hostKeyCallback ssh.HostKeyCallback
-	if server.StrictHostKeyChecking {
+	if server.StrictHostKeyChecking && !config.AutoAcceptHostKeys() {
 		callback, err := knownhosts.New(server.KnownHostsPath)
 		if err != nil {
 			return nil, errors.New("known_hosts could not be loaded")
@@ -624,6 +727,17 @@ func (s *Service) connect(ctx context.Context, server *config.ServerConfig) (*ss
 			return nil, errors.New("password credential is unavailable")
 		}
 		authMethods = append(authMethods, ssh.Password(password))
+		// Some servers (PAM-backed sshd, network appliances) only advertise
+		// keyboard-interactive rather than the "password" auth method, even
+		// for a plain username/password login. Answer every prompt with the
+		// configured password so those targets still authenticate.
+		authMethods = append(authMethods, ssh.KeyboardInteractive(func(_, _ string, questions []string, _ []bool) ([]string, error) {
+			answers := make([]string, len(questions))
+			for i := range answers {
+				answers[i] = password
+			}
+			return answers, nil
+		}))
 	}
 	if len(authMethods) == 0 {
 		return nil, errors.New("no SSH authentication method is configured")
@@ -685,6 +799,19 @@ func release(server *config.ServerConfig) {
 	<-server.Slots
 }
 
+func acquireTunnel(ctx context.Context, server *config.ServerConfig) error {
+	select {
+	case server.TunnelSlots <- struct{}{}:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+func releaseTunnel(server *config.ServerConfig) {
+	<-server.TunnelSlots
+}
+
 func checkCommandPolicy(server *config.ServerConfig, command string) error {
 	for _, pattern := range server.DeniedPatterns {
 		if pattern.MatchString(command) {
@@ -694,14 +821,30 @@ func checkCommandPolicy(server *config.ServerConfig, command string) error {
 	if len(server.AllowedCommandPrefixes) == 0 {
 		return nil
 	}
+	if hasShellOperators(command) {
+		return errors.New("command contains shell operators that are not allowed with an allowlist")
+	}
 	trimmed := strings.TrimSpace(command)
 	for _, prefix := range server.AllowedCommandPrefixes {
 		prefix = strings.TrimSpace(prefix)
-		if trimmed == prefix || strings.HasPrefix(trimmed, prefix+" ") {
+		if trimmed == prefix {
 			return nil
+		}
+		if strings.HasPrefix(trimmed, prefix) && len(trimmed) > len(prefix) {
+			next, _ := utf8.DecodeRuneInString(trimmed[len(prefix):])
+			if unicode.IsSpace(next) {
+				return nil
+			}
 		}
 	}
 	return errors.New("command is not allowed by the server command policy")
+}
+
+func hasShellOperators(command string) bool {
+	if strings.IndexByte(command, '\x00') >= 0 || strings.IndexByte(command, '\n') >= 0 || strings.IndexByte(command, '\r') >= 0 {
+		return true
+	}
+	return strings.ContainsAny(command, ";|&<>$`(){}'\"\\")
 }
 
 func requiredPath(path string) (string, error) {
@@ -779,13 +922,6 @@ func audit(operation string, server *config.ServerConfig, started time.Time, suc
 func hash(value string) string {
 	digest := sha256.Sum256([]byte(value))
 	return hex.EncodeToString(digest[:8])
-}
-
-func min(left, right int) int {
-	if left < right {
-		return left
-	}
-	return right
 }
 
 type limitedBuffer struct {

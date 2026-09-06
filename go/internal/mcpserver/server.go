@@ -1,7 +1,10 @@
 package mcpserver
 
 import (
+	"bufio"
 	"context"
+	"errors"
+	"io"
 	"log/slog"
 	"os"
 
@@ -79,7 +82,7 @@ func New(service *sshservice.Service) *mcp.Server {
 	)
 
 	addTool(server, "ssh_list_servers", "List configured SSH targets and their enabled capabilities.", func(_ context.Context, _ struct{}) (map[string]any, error) {
-		return map[string]any{"servers": service.ListServers()}, nil
+		return map[string]any{"servers": service.ListServers(), "secretsExposedToModel": false}, nil
 	})
 	addTool(server, "ssh_exec", "Execute a command on a configured SSH target with bounded output and timeout.", func(ctx context.Context, input ExecInput) (map[string]any, error) {
 		return service.Exec(ctx, sshservice.ExecRequest{ServerID: input.ServerID, Command: input.Command, TimeoutMs: input.TimeoutMs, MaxOutputBytes: input.MaxOutputBytes})
@@ -116,8 +119,72 @@ func New(service *sshservice.Service) *mcp.Server {
 }
 
 func Run(ctx context.Context, service *sshservice.Service) error {
-	return New(service).Run(ctx, &mcp.StdioTransport{})
+	reader := &boundedLineReader{reader: bufio.NewReaderSize(os.Stdin, 64*1024), maxBytes: 128 << 20}
+	transport := &mcp.IOTransport{Reader: reader, Writer: nopCloserWriter{Writer: os.Stdout}}
+	return New(service).Run(ctx, transport)
 }
+
+type nopCloserWriter struct {
+	io.Writer
+}
+
+func (nopCloserWriter) Close() error { return nil }
+
+type boundedLineReader struct {
+	reader   *bufio.Reader
+	maxBytes int
+	pending  []byte
+	readErr  error
+}
+
+func (r *boundedLineReader) Read(p []byte) (int, error) {
+	if len(p) == 0 {
+		return 0, nil
+	}
+	if len(r.pending) == 0 && r.readErr == nil {
+		line, err := r.readLine()
+		if len(line) > 0 {
+			r.pending = line
+		}
+		r.readErr = err
+	}
+	if len(r.pending) > 0 {
+		n := copy(p, r.pending)
+		r.pending = r.pending[n:]
+		if len(r.pending) > 0 {
+			return n, nil
+		}
+		if r.readErr != nil {
+			err := r.readErr
+			r.readErr = nil
+			return n, err
+		}
+		return n, nil
+	}
+	if r.readErr != nil {
+		err := r.readErr
+		r.readErr = nil
+		return 0, err
+	}
+	return 0, io.EOF
+}
+
+func (r *boundedLineReader) readLine() ([]byte, error) {
+	var line []byte
+	for {
+		fragment, err := r.reader.ReadSlice('\n')
+		if len(line)+len(fragment) > r.maxBytes {
+			return nil, errors.New("MCP message exceeds the maximum allowed size")
+		}
+		line = append(line, fragment...)
+		if err == bufio.ErrBufferFull {
+			continue
+		}
+		return line, err
+	}
+}
+
+func (r *boundedLineReader) Close() error { return nil }
 
 func addTool[In any, Out any](server *mcp.Server, name, description string, handler func(context.Context, In) (Out, error)) {
 	mcp.AddTool(server, &mcp.Tool{Name: name, Description: description}, func(ctx context.Context, _ *mcp.CallToolRequest, input In) (*mcp.CallToolResult, Out, error) {
