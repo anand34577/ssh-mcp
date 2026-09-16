@@ -3,7 +3,7 @@ module example.com/ssh-mcp-server
 go 1.26.0
 
 require (
-	github.com/modelcontextprotocol/go-sdk v1.7.0
+	github.com/modelcontextprotocol/go-sdk v1.8.0
 	github.com/pkg/sftp v1.13.11
 	golang.org/x/crypto v0.54.0
 )
