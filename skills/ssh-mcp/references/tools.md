@@ -18,13 +18,14 @@ Arguments: none.
     "allowSftp": true, "allowPortForwarding": false,
     "commandTimeoutMs": 60000, "maxOutputBytes": 1048576,
     "maxConcurrentOperations": 4, "maxConcurrentTunnels": 4,
-    "allowedCommandPrefixes": [], "deniedCommandRuleCount": 1
+    "allowedCommandPrefixes": [], "deniedCommandRuleCount": 1,
+    "protectSystem": true
   }],
   "secretsExposedToModel": false
 }
 ```
 
-`effectiveHostKeyPolicy` is `strict`, `disabled`, or `auto-accept`.
+`effectiveHostKeyPolicy` is `strict`, `disabled`, or `auto-accept`. `protectSystem` is `true` when the safety net is on; then `ssh_exec`, `sftp_write_file`, `sftp_delete`, and `sftp_rename` refuse actions that could wipe, break, or switch off the server, with an error starting `blocked by system protection:`.
 
 ## ssh_exec
 

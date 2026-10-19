@@ -21,7 +21,7 @@ These are safe for an agent to suggest, and `connect` and `-validate` are safe f
 | `ssh-mcp-server connect [-app codex,cursor]` | Register with Claude Desktop, Claude Code, Codex, Gemini CLI, Cursor, Windsurf, and VS Code without prompts. Reuses passwords stored in any app. Fixes registrations after the binary moved. |
 | `ssh-mcp-server -validate [-connect]` | Diagnose every server. Exit 0 means all ready. |
 | `ssh-mcp-server update` | Self-update with checksum verification; keeps servers and app connections. Re-running the installer does the same. |
-| `ssh-mcp-server uninstall [-purge] [-yes]` | Remove from every app and delete the binary; `-purge` also deletes `servers.json`. Confirm with the user first. |
+| `ssh-mcp-server uninstall [-purge] [-yes]` | Remove from every app and delete the binary; `-purge` also deletes `servers.json`. Ask the user first, and never add `-purge` unless they asked to delete their settings. |
 
 The server has no telemetry and never contacts the network except for SSH connections and an explicit update.
 
@@ -62,7 +62,7 @@ Key rules:
 - Configure `passwordEnv`, `privateKeyPath`, or both (public key is tried first).
 - Paths accept `~/`, `${user.home}`, and `${ENV_VAR}`.
 - Unknown fields are errors, so typos never silently weaken security.
-- Least privilege: `allowPortForwarding` stays `false` unless needed. `allowedCommandPrefixes` restricts commands (shell metacharacters are then rejected). `deniedCommandRegexes` is a guard rail, not a sandbox.
+- Least privilege: `allowPortForwarding` stays `false` unless needed. `allowedCommandPrefixes` restricts commands (shell metacharacters are then rejected). `deniedCommandRegexes` and `protectSystem` are guard rails, not a sandbox.
 
 Hand-adding a host key, after the user verifies the fingerprint out of band:
 
@@ -72,6 +72,26 @@ ssh-keygen -lf ~/.ssh/known_hosts
 ```
 
 `strictHostKeyChecking: false` only loads with `SSH_MCP_ALLOW_INSECURE_HOST_KEYS=true`, and `SSH_MCP_AUTO_ACCEPT_HOST_KEYS=true` disables verification everywhere. Both are emergency switches, never a fix for a mismatch.
+
+## The safety net (`protectSystem`)
+
+Every server has `protectSystem` on unless its entry says `"protectSystem": false`. While it is on, the server refuses:
+
+- recursive deletes of `/`, system folders (`/etc`, `/usr`, `/var`, `/boot`, ...), or home folders (`rm -rf /`, `rm -rf ~`, `find / -delete`)
+- recursive `chmod`, `chown`, or `chgrp` on those folders, and `mv` of them
+- formatting or overwriting disks (`mkfs`, `wipefs`, `dd of=/dev/sda`, `> /dev/sda`, `shred /dev/...`)
+- `shutdown`, `reboot`, `poweroff`, `halt`, `init 0`/`6`, `systemctl reboot` and similar, and fork bombs
+- SFTP changes to `/etc/passwd`, `/etc/shadow`, `/etc/group`, `/etc/gshadow`, `/etc/sudoers`, `/etc/fstab`, writes inside `/boot`, `/dev`, `/proc`, `/sys`, and deleting or renaming system or home folders
+
+It looks through `sudo`, `env`, `sh -c`, quotes, and `;`, `&&`, `|` chains. Everyday commands such as `rm -rf /tmp/build` or `systemctl restart nginx` are not affected.
+
+**Turning it off is the user's decision, never yours.** Only help when the user explicitly asks to turn it off. Then:
+
+1. Explain what it protects against, and suggest turning it off only for the one server and only for as long as needed.
+2. Tell the user to add `"protectSystem": false` to that server's entry in `servers.json` (see [Where things live](#where-things-live)), save, and fully restart the AI app.
+3. Remind them to remove the line afterwards to turn it back on.
+
+Never edit `servers.json` to turn it off on your own, and never suggest it as a way past a blocked command unless the user asked.
 
 ## Manual client registration
 
@@ -105,6 +125,7 @@ Always use absolute paths.
 | `keyboard-interactive challenge is not a single password prompt` | The server requires MFA/OTP; use a key-based account. |
 | `cannot reach host:port` / `timed out` | DNS, firewall, VPN, or wrong port; check with `ssh` directly. Raise `connectTimeoutMs` for slow links. |
 | `command is not allowed by the server command policy` | Expected in look-only or allow-list mode. |
+| `blocked by system protection: …` | The safety net refused a risky action. Expected. See [The safety net](#the-safety-net-protectsystem). |
 | AI app doesn't show the tools | Fully restart the app; run `ssh-mcp-server connect`. |
 
 Logs and audit lines (`audit operation=… server=… success=…`) go to stderr, which the AI app usually shows in its MCP log view. Command text is never logged, only a short hash.
