@@ -15,6 +15,8 @@ Giving an AI access to a server is a big deal. SSH MCP is built so you stay in c
 - Every command has a time limit and an output limit, so nothing can run away.
 - Tunnels are off unless you turn them on, and they only ever open on your own computer, never to your network.
 
+**A safety net catches the worst mistakes.** Even with full access, SSH MCP refuses a short list of actions that could wipe or break a server. See [The safety net](#the-safety-net) below.
+
 **The AI can't argue its way past your rules.** The rules are enforced by SSH MCP on your computer, before anything reaches the server. The AI only sees the result.
 
 **Every action is logged** on your computer: which server, what kind of action, whether it worked, and how long it took. Command text and passwords are not logged; a short fingerprint of each command is recorded instead.
@@ -22,6 +24,25 @@ Giving an AI access to a server is a big deal. SSH MCP is built so you stay in c
 **Settings files are protected.** On macOS and Linux, files SSH MCP writes can only be read by your user account. Before it changes an AI app's settings, it saves a backup copy.
 
 **Downloads are verified.** The installers and the `update` command check each download against its published SHA-256 fingerprint and refuse anything that doesn't match.
+
+## The safety net
+
+AI assistants can make mistakes, just like people. So SSH MCP stops a few actions that are almost never what you want, and that can't be undone:
+
+- Deleting everything, a system folder, or a whole home folder (for example `rm -rf /` or `rm -rf ~`)
+- Formatting or wiping a disk, or writing straight over one
+- Shutting down or restarting the server
+- Changing the files that control who can sign in (`/etc/passwd`, `/etc/shadow`, `/etc/sudoers`) or how the server starts (`/etc/fstab`, `/boot`)
+- Changing the owner or permissions of every file in a system folder at once
+- Tricks that freeze the server, like a "fork bomb"
+
+It still spots these when they're hidden behind `sudo`, inside quotes, or in the middle of a longer command. Everyday work, like deleting a project's build folder or restarting a web server, is not affected.
+
+When something is blocked, the AI is told to stop and tell you what happened rather than try another way.
+
+**Turning it off.** The safety net is on for every server unless you switch it off. If you really need the AI to do one of these things, open your [settings file](Settings-File) and add `"protectSystem": false` to that server, then restart your AI app. Turn it back on afterwards by removing the line.
+
+The safety net catches mistakes; it isn't a locked door. For real limits, use look-only mode, an allowed-commands list, and a server account without admin rights.
 
 ## Good habits
 

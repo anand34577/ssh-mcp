@@ -202,6 +202,9 @@ func (s *Service) SFTPWrite(ctx context.Context, request SFTPWriteRequest) (map[
 	if len(data) > server.MaxOutputBytes {
 		return nil, fmt.Errorf("file content is %d bytes, which exceeds maxOutputBytes (%d) for this server", len(data), server.MaxOutputBytes)
 	}
+	if err := checkPathGuard(server, "sftp_write_file", path, true); err != nil {
+		return nil, err
+	}
 	return s.withSFTP(ctx, server, "sftp_write_file", func(_ context.Context, client *sftp.Client) (map[string]any, error) {
 		file, err := client.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_TRUNC)
 		if err != nil {
@@ -242,6 +245,9 @@ func (s *Service) SFTPDelete(ctx context.Context, request SFTPDeleteRequest) (ma
 	if err != nil {
 		return nil, err
 	}
+	if err := checkPathGuard(server, "sftp_delete", path, false); err != nil {
+		return nil, err
+	}
 	return s.withSFTP(ctx, server, "sftp_delete", func(_ context.Context, client *sftp.Client) (map[string]any, error) {
 		if request.Directory {
 			err = client.RemoveDirectory(path)
@@ -262,6 +268,12 @@ func (s *Service) SFTPRename(ctx context.Context, request SFTPRenameRequest) (ma
 	}
 	to, err := requiredPath("to", request.To)
 	if err != nil {
+		return nil, err
+	}
+	if err := checkPathGuard(server, "sftp_rename", from, false); err != nil {
+		return nil, err
+	}
+	if err := checkPathGuard(server, "sftp_rename", to, true); err != nil {
 		return nil, err
 	}
 	return s.withSFTP(ctx, server, "sftp_rename", func(_ context.Context, client *sftp.Client) (map[string]any, error) {
@@ -293,6 +305,18 @@ func (s *Service) withSFTP(ctx context.Context, server *config.ServerConfig, ope
 		return nil, operationError("SFTP "+strings.TrimPrefix(operation, "sftp_"), err)
 	}
 	return result, nil
+}
+
+// checkPathGuard applies system protection to an SFTP change.
+func checkPathGuard(server *config.ServerConfig, operation, path string, write bool) error {
+	if !server.ProtectSystem {
+		return nil
+	}
+	if reason := pathViolation(path, write); reason != "" {
+		audit(operation, server, time.Now(), false, "policy_rejected")
+		return guardError(server, reason)
+	}
+	return nil
 }
 
 // sftpTarget validates the server (with SFTP enabled) and the primary path.

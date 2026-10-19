@@ -19,8 +19,9 @@
       "allowPortForwarding": false,
       "allowedCommandPrefixes": [],
       "deniedCommandRegexes": [
-        "(?i)\\b(shutdown|reboot|poweroff|halt)\\b"
-      ]
+        "(?i)\\bapt(-get)?\\s+(remove|purge)\\b"
+      ],
+      "protectSystem": true
     },
     {
       "id": "staging-password-auth",

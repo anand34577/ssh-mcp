@@ -171,6 +171,7 @@ final class SshService implements AutoCloseable {
             ArrayNode prefixes = item.putArray("allowedCommandPrefixes");
             server.allowedCommandPrefixes().forEach(prefixes::add);
             item.put("deniedCommandRuleCount", server.deniedCommandPatterns().size());
+            item.put("protectSystem", server.protectSystem());
         }
         result.put("secretsExposedToModel", false);
         return result;
@@ -338,6 +339,7 @@ final class SshService implements AutoCloseable {
             throw new InvalidToolArguments("file content is " + bytes.length + " bytes, which exceeds maxOutputBytes ("
                     + server.maxOutputBytes() + ") for this server");
         }
+        checkPathGuard(server, "sftp_write_file", path, true);
         return withSftp(server, "sftp_write_file", sftp -> {
             // Closing the stream flushes outstanding writes and reports their errors.
             try (OutputStream output = sftp.write(path, SFTP_CHUNK, SftpClient.OpenMode.Create,
@@ -371,6 +373,7 @@ final class SshService implements AutoCloseable {
         Config.ServerConfig server = sftpServer(arguments);
         String path = required(arguments, "path");
         boolean directory = bool(arguments, "directory", false);
+        checkPathGuard(server, "sftp_delete", path, false);
         return withSftp(server, "sftp_delete", sftp -> {
             if (directory) {
                 sftp.rmdir(path);
@@ -387,6 +390,8 @@ final class SshService implements AutoCloseable {
         String from = required(arguments, "from");
         String to = required(arguments, "to");
         boolean overwrite = bool(arguments, "overwrite", false);
+        checkPathGuard(server, "sftp_rename", from, false);
+        checkPathGuard(server, "sftp_rename", to, true);
         return withSftp(server, "sftp_rename", sftp -> {
             if (overwrite) {
                 OpenSSHPosixRenameExtension posixRename = sftp.getExtension(OpenSSHPosixRenameExtension.class);
@@ -572,6 +577,18 @@ final class SshService implements AutoCloseable {
         return servers;
     }
 
+    /** Applies system protection to an SFTP change. */
+    static void checkPathGuard(Config.ServerConfig server, String operation, String path, boolean write) throws OperationRejected {
+        if (!server.protectSystem()) {
+            return;
+        }
+        String reason = SystemGuard.pathViolation(path, write);
+        if (reason != null) {
+            AuditLog.operation(operation, server, false, 0, "policy_rejected");
+            throw new OperationRejected(SystemGuard.message(server.id(), reason));
+        }
+    }
+
     private <T> T withSftp(Config.ServerConfig server, String operation, SftpOperation<T> body) throws Exception {
         return withConnection(server, operation, "", server.commandTimeoutMs(), connection -> {
             SftpClient sftp;
@@ -738,7 +755,17 @@ final class SshService implements AutoCloseable {
         return value;
     }
 
+    /**
+     * Enforces system protection first, then deniedCommandRegexes, then the allow-list. With an
+     * allow-list configured, shell metacharacters are rejected so a prefix cannot be chained.
+     */
     static void checkCommandPolicy(Config.ServerConfig server, String command) throws OperationRejected {
+        if (server.protectSystem()) {
+            String reason = SystemGuard.commandViolation(command);
+            if (reason != null) {
+                throw new OperationRejected(SystemGuard.message(server.id(), reason));
+            }
+        }
         for (Pattern pattern : server.deniedCommandPatterns()) {
             if (pattern.matcher(command).find()) {
                 throw new OperationRejected("command rejected by the server command policy (matched a deniedCommandRegexes rule)");

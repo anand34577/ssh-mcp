@@ -46,7 +46,7 @@ final class Config {
             "privateKeyPassphraseEnv", "knownHostsPath", "strictHostKeyChecking",
             "connectTimeoutMs", "commandTimeoutMs", "maxOutputBytes",
             "maxConcurrentOperations", "maxConcurrentTunnels", "allowSftp", "allowPortForwarding",
-            "allowedCommandPrefixes", "deniedCommandRegexes"));
+            "allowedCommandPrefixes", "deniedCommandRegexes", "protectSystem"));
     private static final List<String> FORBIDDEN_SECRET_FIELDS = Arrays.asList(
             "password", "passphrase", "privateKey", "privateKeyContent", "secret");
     private static final Pattern SERVER_ID = Pattern.compile("[A-Za-z0-9._-]{1,64}");
@@ -296,6 +296,7 @@ final class Config {
         private final boolean allowPortForwarding;
         private final List<String> allowedCommandPrefixes;
         private final List<Pattern> deniedCommandPatterns;
+        private final boolean protectSystem;
 
         private ServerConfig(Builder builder) {
             this.id = builder.id;
@@ -318,6 +319,7 @@ final class Config {
             this.allowPortForwarding = builder.allowPortForwarding;
             this.allowedCommandPrefixes = Collections.unmodifiableList(builder.allowedCommandPrefixes);
             this.deniedCommandPatterns = Collections.unmodifiableList(builder.deniedCommandPatterns);
+            this.protectSystem = builder.protectSystem;
         }
 
         static ServerConfig from(JsonNode node) throws IOException {
@@ -377,6 +379,8 @@ final class Config {
             b.maxConcurrentTunnels = integer(node, "maxConcurrentTunnels", 4, 1, 64);
             b.allowSftp = bool(node, "allowSftp", true);
             b.allowPortForwarding = bool(node, "allowPortForwarding", false);
+            // Refuses commands and file changes that could wipe, break, or switch off the server.
+            b.protectSystem = bool(node, "protectSystem", true);
 
             List<String> denied = strings(node, "deniedCommandRegexes");
             for (int i = 0; i < denied.size(); i++) {
@@ -524,6 +528,7 @@ final class Config {
         boolean allowPortForwarding() { return allowPortForwarding; }
         List<String> allowedCommandPrefixes() { return allowedCommandPrefixes; }
         List<Pattern> deniedCommandPatterns() { return deniedCommandPatterns; }
+        boolean protectSystem() { return protectSystem; }
 
         String effectiveHostKeyPolicy() {
             if (autoAcceptHostKeys()) {
@@ -551,6 +556,7 @@ final class Config {
             boolean allowPortForwarding;
             List<String> allowedCommandPrefixes = new ArrayList<>();
             final List<Pattern> deniedCommandPatterns = new ArrayList<>();
+            boolean protectSystem;
         }
     }
 }

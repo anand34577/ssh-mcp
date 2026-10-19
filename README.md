@@ -69,7 +69,7 @@ Prefer to click? Download your file from the [latest release](https://github.com
 - **Plain words in, real answers out.** Check health, read logs, find the cause, fix it, manage files.
 - **Your secrets stay home.** Passwords and keys are used only on your computer and never reach the AI.
 - **You set the limits.** Give full access, or *look-only* (status and logs, no changes) per server. Add your own allow and block lists.
-- **Safe by default.** Every server's identity is verified. Commands have time and output limits. Every action is logged on your computer.
+- **Safe by default.** A built-in safety net blocks disasters like `rm -rf /`, formatting a disk, or shutting the server down. Every server's identity is verified, commands have time and output limits, and every action is logged on your computer.
 - **Works everywhere.** Windows, macOS, and Linux, on Intel/AMD and ARM. One small program with nothing else to install.
 - **Private.** No analytics, no telemetry, no accounts. It only talks to your servers, and to GitHub when you ask it to update. [Read more](https://github.com/anand34577/ssh-mcp/wiki/Privacy).
 
@@ -119,6 +119,7 @@ SSH MCP can run commands on real servers, so it was built to keep you in control
 - **Secrets:** credentials never appear in anything the AI sees, and the settings file refuses to hold them.
 - **Server identity:** fingerprints are verified on every connection.
 - **Your rules:** they're enforced on your computer before anything reaches the server.
+- **Safety net:** actions that could wipe or break a server (deleting system folders, formatting disks, shutting down) are refused unless you turn this off for that server with `"protectSystem": false`.
 - **Downloads:** every one is checked against a published SHA-256 checksum.
 
 The server account's own permissions are always the final limit, so a separate, limited account for the AI is the best protection of all.
@@ -168,7 +169,8 @@ The settings file holds a `servers` array (plus an optional `$schema` for editor
 | `allowSftp` | boolean | `true` | Enables the file tools. |
 | `allowPortForwarding` | boolean | `false` | Enables tunnels. |
 | `allowedCommandPrefixes` | string[] | `[]` | When set, commands must start with one of these at a word boundary, and shell metacharacters are refused. |
-| `deniedCommandRegexes` | string[] | `[]` | Any match refuses the command. Checked first. |
+| `deniedCommandRegexes` | string[] | `[]` | Any match refuses the command. Checked before the allow-list. |
+| `protectSystem` | boolean | `true` | Built-in safety net. Refuses commands and file changes that could wipe, break, or switch off the server: recursive deletes of `/`, system folders, or home folders (`rm -rf /`, `rm -rf ~`, `find / -delete`), recursive `chmod`/`chown` on them, formatting or overwriting disks (`mkfs`, `dd of=/dev/sda`, `> /dev/sda`, `wipefs`), `shutdown`/`reboot`/`poweroff`, fork bombs, and SFTP changes to `/etc/passwd`, `/etc/shadow`, `/etc/sudoers`, `/etc/fstab`, or inside `/boot`, `/dev`, `/proc`, `/sys`. Looks through `sudo`, `sh -c`, quotes, and `;`/`&&`/`\|` chains. Set `false` to turn it off for this server. |
 
 Load-time rules: unknown fields, out-of-range values (including an explicit `0`), inline secrets (`password`, `passphrase`, `privateKey`, `privateKeyContent`, `secret`), and duplicate ids are all rejected.
 
@@ -218,7 +220,7 @@ ssh-mcp-server version | help
 - Each tool call opens a fresh SSH connection. There's no persistent shell, so use absolute paths.
 - No TTY or interactive programs. Commands that prompt block until their timeout.
 - No SSH agent, GSSAPI/Kerberos, or one-time-code MFA. Very old servers that only speak deprecated algorithms won't connect.
-- `deniedCommandRegexes` is a guard rail, not a sandbox. Use `allowedCommandPrefixes` and a least-privilege account for real restriction.
+- `protectSystem` and `deniedCommandRegexes` are guard rails against mistakes, not a sandbox: a deliberately disguised command can get past them. Use `allowedCommandPrefixes` and a least-privilege account for real restriction.
 - `sftp_write_file` rewrites in place. For critical files, write a temporary file and `sftp_rename` it with `overwrite: true`.
 
 ### Build, test, and release

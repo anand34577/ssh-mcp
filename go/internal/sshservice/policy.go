@@ -9,10 +9,16 @@ import (
 	"example.com/ssh-mcp-server/internal/config"
 )
 
-// checkCommandPolicy enforces deniedCommandRegexes first, then the allow-list.
-// With an allow-list configured, shell metacharacters are rejected outright so
-// an allowed prefix cannot be chained into an arbitrary command.
+// checkCommandPolicy enforces system protection first, then
+// deniedCommandRegexes, then the allow-list. With an allow-list configured,
+// shell metacharacters are rejected outright so an allowed prefix cannot be
+// chained into an arbitrary command.
 func checkCommandPolicy(server *config.ServerConfig, command string) error {
+	if server.ProtectSystem {
+		if reason := commandViolation(command); reason != "" {
+			return guardError(server, reason)
+		}
+	}
 	for _, pattern := range server.DeniedPatterns {
 		if pattern.MatchString(command) {
 			return errors.New("command rejected by the server command policy (matched a deniedCommandRegexes rule)")

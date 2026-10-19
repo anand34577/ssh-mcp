@@ -51,6 +51,9 @@ type ServerConfig struct {
 	AllowPortForwarding     bool     `json:"allowPortForwarding"`
 	AllowedCommandPrefixes  []string `json:"allowedCommandPrefixes"`
 	DeniedCommandRegexes    []string `json:"deniedCommandRegexes"`
+	// ProtectSystem (default true) refuses commands and file changes that
+	// could wipe, break, or switch off the server; see sshservice/guard.go.
+	ProtectSystem bool `json:"protectSystem"`
 
 	DeniedPatterns []*regexp.Regexp `json:"-"`
 	// Slots bounds concurrent short-lived operations (ssh_exec, sftp_*).
@@ -67,6 +70,7 @@ var allowedServerFields = map[string]struct{}{
 	"strictHostKeyChecking": {}, "connectTimeoutMs": {}, "commandTimeoutMs": {},
 	"maxOutputBytes": {}, "maxConcurrentOperations": {}, "maxConcurrentTunnels": {}, "allowSftp": {},
 	"allowPortForwarding": {}, "allowedCommandPrefixes": {}, "deniedCommandRegexes": {},
+	"protectSystem": {},
 }
 
 // "$schema" lets editors offer completion and validation from
@@ -263,6 +267,9 @@ func parseServer(raw json.RawMessage) (*ServerConfig, error) {
 
 	if !hasNonNullField(fields, "allowSftp") {
 		server.AllowSFTP = true
+	}
+	if !hasNonNullField(fields, "protectSystem") {
+		server.ProtectSystem = true
 	}
 	limits := []error{
 		bounded(fields, server.ID, "port", &server.Port, 22, 1, 65535),
