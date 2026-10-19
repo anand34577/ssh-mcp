@@ -16,3 +16,4 @@ config/known_hosts
 .idea/
 .vscode/
 *.iml
+*.syso

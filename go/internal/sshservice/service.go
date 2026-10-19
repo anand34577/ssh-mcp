@@ -1,37 +1,41 @@
+// Package sshservice implements the SSH, SFTP, and tunnel operations exposed
+// as MCP tools. Every operation opens its own SSH connection, is bounded by a
+// per-server concurrency slot and timeout, and is audited to stderr without
+// secrets or command text.
 package sshservice
 
 import (
 	"bytes"
 	"context"
 	"crypto/sha256"
-	"encoding/base64"
 	"encoding/hex"
 	"errors"
 	"fmt"
-	"io"
 	"log"
-	"net"
-	"os"
-	"path/filepath"
 	"sort"
-	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
-	"unicode"
 	"unicode/utf8"
 
 	"example.com/ssh-mcp-server/internal/config"
-	"github.com/pkg/sftp"
 	"golang.org/x/crypto/ssh"
-	"golang.org/x/crypto/ssh/knownhosts"
 )
+
+const (
+	maxCommandBytes = 32768
+	// execKillGrace is how long a timed-out command gets to report its exit
+	// after the session is closed before its result is returned anyway.
+	execKillGrace = 2 * time.Second
+)
+
+var errServiceClosed = errors.New("SSH service is shutting down")
 
 type Service struct {
 	catalog *config.Catalog
 
-	mu         sync.RWMutex
+	mu         sync.Mutex
 	tunnels    map[string]*Tunnel
 	nextTunnel atomic.Uint64
 	closed     atomic.Bool
@@ -44,72 +48,14 @@ type ExecRequest struct {
 	MaxOutputBytes int
 }
 
-type SFTPListRequest struct {
-	ServerID   string
-	Path       string
-	MaxEntries int
-}
-
-type SFTPStatRequest struct {
-	ServerID string
-	Path     string
-}
-
-type SFTPReadRequest struct {
-	ServerID string
-	Path     string
-	MaxBytes int
-	Encoding string
-}
-
-type SFTPWriteRequest struct {
-	ServerID      string
-	Path          string
-	Content       *string
-	ContentBase64 *string
-}
-
-type SFTPMkdirRequest struct {
-	ServerID string
-	Path     string
-}
-
-type SFTPDeleteRequest struct {
-	ServerID  string
-	Path      string
-	Directory bool
-}
-
-type TunnelOpenRequest struct {
-	ServerID   string
-	LocalHost  string
-	LocalPort  int
-	RemoteHost string
-	RemotePort int
-}
-
-type Tunnel struct {
-	id          string
-	server      *config.ServerConfig
-	client      *ssh.Client
-	listener    net.Listener
-	service     *Service
-	connections chan struct{}
-	closeOnce   sync.Once
-}
-
 func New(catalog *config.Catalog) *Service {
 	return &Service{catalog: catalog, tunnels: make(map[string]*Tunnel)}
 }
 
+// ListServers returns non-secret metadata for every configured target.
 func (s *Service) ListServers() []map[string]any {
 	items := make([]map[string]any, 0, len(s.catalog.Servers))
-	servers := make([]*config.ServerConfig, 0, len(s.catalog.Servers))
-	for _, server := range s.catalog.Servers {
-		servers = append(servers, server)
-	}
-	sort.Slice(servers, func(i, j int) bool { return servers[i].ID < servers[j].ID })
-	for _, server := range servers {
+	for _, server := range s.sortedServers() {
 		authMethods := make([]string, 0, 2)
 		if server.PrivateKeyPath != "" {
 			authMethods = append(authMethods, "publicKey")
@@ -117,12 +63,9 @@ func (s *Service) ListServers() []map[string]any {
 		if server.PasswordEnv != "" {
 			authMethods = append(authMethods, "password")
 		}
-		hostKeyPolicy := "strict"
-		if !server.StrictHostKeyChecking {
-			hostKeyPolicy = "disabled"
-		}
-		if config.AutoAcceptHostKeys() {
-			hostKeyPolicy = "auto-accept"
+		allowedPrefixes := server.AllowedCommandPrefixes
+		if allowedPrefixes == nil {
+			allowedPrefixes = []string{}
 		}
 		items = append(items, map[string]any{
 			"id":                      server.ID,
@@ -131,13 +74,17 @@ func (s *Service) ListServers() []map[string]any {
 			"username":                server.Username,
 			"configuredAuthMethods":   authMethods,
 			"strictHostKeyChecking":   server.StrictHostKeyChecking,
-			"effectiveHostKeyPolicy":  hostKeyPolicy,
+			"effectiveHostKeyPolicy":  effectiveHostKeyPolicy(server),
 			"allowSftp":               server.AllowSFTP,
 			"allowPortForwarding":     server.AllowPortForwarding,
 			"sftpEnabled":             server.AllowSFTP,
 			"portForwardingEnabled":   server.AllowPortForwarding,
+			"commandTimeoutMs":        server.CommandTimeoutMs,
+			"maxOutputBytes":          server.MaxOutputBytes,
 			"maxConcurrentOperations": server.MaxConcurrentOperations,
 			"maxConcurrentTunnels":    server.MaxConcurrentTunnels,
+			"allowedCommandPrefixes":  allowedPrefixes,
+			"deniedCommandRuleCount":  len(server.DeniedPatterns),
 		})
 	}
 	return items
@@ -152,10 +99,12 @@ func (s *Service) Exec(ctx context.Context, request ExecRequest) (map[string]any
 	if command == "" {
 		return nil, errors.New("command is required")
 	}
-	if len(command) > 32768 {
-		return nil, errors.New("command must be at most 32768 characters")
+	if len(command) > maxCommandBytes {
+		return nil, fmt.Errorf("command must be at most %d bytes", maxCommandBytes)
 	}
+	commandHash := "commandHash=" + hash(command)
 	if err := checkCommandPolicy(server, command); err != nil {
+		audit("ssh_exec", server, time.Now(), false, "policy_rejected "+commandHash)
 		return nil, err
 	}
 	timeout, err := validateTimeout(request.TimeoutMs, server.CommandTimeoutMs)
@@ -166,11 +115,8 @@ func (s *Service) Exec(ctx context.Context, request ExecRequest) (map[string]any
 	if err != nil {
 		return nil, err
 	}
-	operationCtx, cancel := context.WithTimeout(ctx, timeout)
-	defer cancel()
-	started := time.Now()
 
-	result, err := s.withClient(operationCtx, server, "ssh_exec", func(client *ssh.Client) (map[string]any, error) {
+	result, err := s.withClient(ctx, server, "ssh_exec", commandHash, timeout, func(ctx context.Context, client *ssh.Client) (map[string]any, error) {
 		session, err := client.NewSession()
 		if err != nil {
 			return nil, err
@@ -181,6 +127,7 @@ func (s *Service) Exec(ctx context.Context, request ExecRequest) (map[string]any
 		stderr := &limitedBuffer{limit: maxOutput}
 		session.Stdout = stdout
 		session.Stderr = stderr
+		started := time.Now()
 		if err := session.Start(command); err != nil {
 			return nil, err
 		}
@@ -188,31 +135,44 @@ func (s *Service) Exec(ctx context.Context, request ExecRequest) (map[string]any
 		wait := make(chan error, 1)
 		go func() { wait <- session.Wait() }()
 		var waitErr error
-		timedOut := false
+		contextDone := false
 		select {
 		case waitErr = <-wait:
-		case <-operationCtx.Done():
-			timedOut = errors.Is(operationCtx.Err(), context.DeadlineExceeded)
+		case <-ctx.Done():
+			contextDone = true
+			_ = session.Signal(ssh.SIGKILL)
 			_ = session.Close()
 			select {
 			case waitErr = <-wait:
-			case <-time.After(2 * time.Second):
-				waitErr = operationCtx.Err()
+			case <-time.After(execKillGrace):
+				waitErr = ctx.Err()
 			}
 		}
 
-		exitCode := any(nil)
-		exitSignal := ""
-		if exitErr, ok := waitErr.(*ssh.ExitError); ok {
-			if exitErr.Signal() != "" {
-				exitSignal = exitErr.Signal()
-			} else {
-				exitCode = exitErr.ExitStatus()
+		// The client is closed when the deadline passes, so Wait can also
+		// return a transport error first; treat that as a timeout too.
+		var exitErr *ssh.ExitError
+		exited := waitErr == nil || errors.As(waitErr, &exitErr)
+		timedOut := false
+		if contextDone || !exited {
+			switch {
+			case ctx.Err() == nil:
+				return nil, waitErr
+			case !errors.Is(ctx.Err(), context.DeadlineExceeded):
+				return nil, ctx.Err()
 			}
-		} else if waitErr == nil {
+			timedOut = true
+		}
+
+		var exitCode any
+		exitSignal := ""
+		switch {
+		case exitErr != nil && exitErr.Signal() != "":
+			exitSignal = exitErr.Signal()
+		case exitErr != nil:
+			exitCode = exitErr.ExitStatus()
+		case waitErr == nil:
 			exitCode = 0
-		} else if !timedOut {
-			return nil, waitErr
 		}
 
 		return map[string]any{
@@ -222,637 +182,126 @@ func (s *Service) Exec(ctx context.Context, request ExecRequest) (map[string]any
 			"exitCode":        exitCode,
 			"exitSignal":      exitSignal,
 			"timedOut":        timedOut,
-			"stdoutTruncated": stdout.truncated,
-			"stderrTruncated": stderr.truncated,
+			"stdoutTruncated": stdout.Truncated(),
+			"stderrTruncated": stderr.Truncated(),
 			"durationMs":      time.Since(started).Milliseconds(),
 		}, nil
 	})
 	if err != nil {
-		return nil, safeOperationError("SSH command", err)
+		return nil, operationError("SSH command", err)
 	}
-	audit("ssh_exec", server, started, true, "commandHash="+hash(command))
 	return result, nil
 }
 
-func (s *Service) SFTPList(ctx context.Context, request SFTPListRequest) (map[string]any, error) {
-	server, err := s.sftpServer(request.ServerID)
-	if err != nil {
-		return nil, err
-	}
-	path, err := requiredPath(request.Path)
-	if err != nil {
-		return nil, err
-	}
-	maxEntries := request.MaxEntries
-	if maxEntries == 0 {
-		maxEntries = 1000
-	}
-	if maxEntries < 1 || maxEntries > 10000 {
-		return nil, errors.New("maxEntries must be between 1 and 10000")
-	}
-	operationCtx, cancel := context.WithTimeout(ctx, time.Duration(server.CommandTimeoutMs)*time.Millisecond)
-	defer cancel()
-
-	return s.withSFTP(operationCtx, server, "sftp_list", func(client *sftp.Client) (map[string]any, error) {
-		entries, err := client.ReadDirContext(operationCtx, path)
-		if err != nil {
-			return nil, err
-		}
-		items := make([]map[string]any, 0, min(len(entries), maxEntries))
-		truncated := len(entries) > maxEntries
-		for _, entry := range entries[:min(len(entries), maxEntries)] {
-			items = append(items, fileInfoMap(entry, entry.Name()))
-		}
-		return map[string]any{"serverId": server.ID, "path": path, "entries": items, "truncated": truncated}, nil
-	})
-}
-
-func (s *Service) SFTPStat(ctx context.Context, request SFTPStatRequest) (map[string]any, error) {
-	server, err := s.sftpServer(request.ServerID)
-	if err != nil {
-		return nil, err
-	}
-	path, err := requiredPath(request.Path)
-	if err != nil {
-		return nil, err
-	}
-	operationCtx, cancel := context.WithTimeout(ctx, time.Duration(server.CommandTimeoutMs)*time.Millisecond)
-	defer cancel()
-	return s.withSFTP(operationCtx, server, "sftp_stat", func(client *sftp.Client) (map[string]any, error) {
-		info, err := client.Stat(path)
-		if err != nil {
-			return nil, err
-		}
-		result := fileInfoMap(info, "")
-		result["serverId"] = server.ID
-		result["path"] = path
-		return result, nil
-	})
-}
-
-func (s *Service) SFTPRead(ctx context.Context, request SFTPReadRequest) (map[string]any, error) {
-	server, err := s.sftpServer(request.ServerID)
-	if err != nil {
-		return nil, err
-	}
-	path, err := requiredPath(request.Path)
-	if err != nil {
-		return nil, err
-	}
-	maxBytes := request.MaxBytes
-	if maxBytes == 0 {
-		maxBytes = server.MaxOutputBytes
-	}
-	if maxBytes < 1 || maxBytes > server.MaxOutputBytes {
-		return nil, fmt.Errorf("maxBytes must be between 1 and %d", server.MaxOutputBytes)
-	}
-	encoding := strings.ToLower(strings.TrimSpace(request.Encoding))
-	if encoding == "" {
-		encoding = "utf8"
-	}
-	if encoding != "utf8" && encoding != "base64" {
-		return nil, errors.New("encoding must be 'utf8' or 'base64'")
-	}
-	operationCtx, cancel := context.WithTimeout(ctx, time.Duration(server.CommandTimeoutMs)*time.Millisecond)
-	defer cancel()
-	return s.withSFTP(operationCtx, server, "sftp_read_file", func(client *sftp.Client) (map[string]any, error) {
-		file, err := client.Open(path)
-		if err != nil {
-			return nil, err
-		}
-		defer file.Close()
-		data, err := io.ReadAll(io.LimitReader(file, int64(maxBytes)+1))
-		if err != nil {
-			return nil, err
-		}
-		truncated := len(data) > maxBytes
-		if truncated {
-			data = data[:maxBytes]
-		}
-		result := map[string]any{
-			"serverId":  server.ID,
-			"path":      path,
-			"bytes":     len(data),
-			"truncated": truncated,
-			"encoding":  encoding,
-		}
-		if encoding == "base64" {
-			result["contentBase64"] = base64.StdEncoding.EncodeToString(data)
-		} else {
-			result["content"] = string(data)
-		}
-		return result, nil
-	})
-}
-
-func (s *Service) SFTPWrite(ctx context.Context, request SFTPWriteRequest) (map[string]any, error) {
-	server, err := s.sftpServer(request.ServerID)
-	if err != nil {
-		return nil, err
-	}
-	path, err := requiredPath(request.Path)
-	if err != nil {
-		return nil, err
-	}
-	if (request.Content == nil) == (request.ContentBase64 == nil) {
-		return nil, errors.New("provide exactly one of content or contentBase64")
-	}
-	var data []byte
-	if request.Content != nil {
-		data = []byte(*request.Content)
-	} else {
-		data, err = base64.StdEncoding.DecodeString(*request.ContentBase64)
-		if err != nil {
-			return nil, errors.New("contentBase64 is not valid base64")
-		}
-	}
-	if len(data) > server.MaxOutputBytes {
-		return nil, errors.New("file content exceeds maxOutputBytes for this server")
-	}
-	operationCtx, cancel := context.WithTimeout(ctx, time.Duration(server.CommandTimeoutMs)*time.Millisecond)
-	defer cancel()
-	return s.withSFTP(operationCtx, server, "sftp_write_file", func(client *sftp.Client) (map[string]any, error) {
-		file, err := client.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_TRUNC)
-		if err != nil {
-			return nil, err
-		}
-		defer file.Close()
-		written, err := file.Write(data)
-		if err != nil {
-			return nil, err
-		}
-		if written != len(data) {
-			return nil, io.ErrShortWrite
-		}
-		return map[string]any{"serverId": server.ID, "path": path, "bytesWritten": len(data)}, nil
-	})
-}
-
-func (s *Service) SFTPMkdir(ctx context.Context, request SFTPMkdirRequest) (map[string]any, error) {
-	server, err := s.sftpServer(request.ServerID)
-	if err != nil {
-		return nil, err
-	}
-	path, err := requiredPath(request.Path)
-	if err != nil {
-		return nil, err
-	}
-	operationCtx, cancel := context.WithTimeout(ctx, time.Duration(server.CommandTimeoutMs)*time.Millisecond)
-	defer cancel()
-	return s.withSFTP(operationCtx, server, "sftp_mkdir", func(client *sftp.Client) (map[string]any, error) {
-		if err := client.Mkdir(path); err != nil {
-			return nil, err
-		}
-		return map[string]any{"serverId": server.ID, "path": path, "created": true}, nil
-	})
-}
-
-func (s *Service) SFTPDelete(ctx context.Context, request SFTPDeleteRequest) (map[string]any, error) {
-	server, err := s.sftpServer(request.ServerID)
-	if err != nil {
-		return nil, err
-	}
-	path, err := requiredPath(request.Path)
-	if err != nil {
-		return nil, err
-	}
-	operationCtx, cancel := context.WithTimeout(ctx, time.Duration(server.CommandTimeoutMs)*time.Millisecond)
-	defer cancel()
-	return s.withSFTP(operationCtx, server, "sftp_delete", func(client *sftp.Client) (map[string]any, error) {
-		if request.Directory {
-			err = client.RemoveDirectory(path)
-		} else {
-			err = client.Remove(path)
-		}
-		if err != nil {
-			return nil, err
-		}
-		return map[string]any{"serverId": server.ID, "path": path, "deleted": true}, nil
-	})
-}
-
-func (s *Service) OpenTunnel(ctx context.Context, request TunnelOpenRequest) (map[string]any, error) {
-	if s.closed.Load() {
-		return nil, errors.New("SSH service is closed")
-	}
-	server, err := s.server(request.ServerID)
-	if err != nil {
-		return nil, err
-	}
-	if !server.AllowPortForwarding {
-		return nil, errors.New("port forwarding is disabled for this server")
-	}
-	localHost := strings.TrimSpace(request.LocalHost)
-	if localHost == "" {
-		localHost = "127.0.0.1"
-	}
-	if !isLoopbackHost(localHost) {
-		return nil, errors.New("for safety, localHost must be loopback")
-	}
-	if request.LocalPort < 0 || request.LocalPort > 65535 {
-		return nil, errors.New("localPort must be between 0 and 65535")
-	}
-	remoteHost := strings.TrimSpace(request.RemoteHost)
-	if remoteHost == "" {
-		return nil, errors.New("remoteHost is required")
-	}
-	if request.RemotePort < 1 || request.RemotePort > 65535 {
-		return nil, errors.New("remotePort must be between 1 and 65535")
-	}
-	acquireCtx, cancelAcquire := context.WithTimeout(ctx, time.Duration(server.ConnectTimeoutMs)*time.Millisecond)
-	defer cancelAcquire()
-	if err := acquireTunnel(acquireCtx, server); err != nil {
-		if errors.Is(err, context.DeadlineExceeded) {
-			return nil, errors.New("tunnel limit reached for this server: too many open tunnels")
-		}
-		return nil, err
-	}
-	client, err := s.connect(ctx, server)
-	if err != nil {
-		releaseTunnel(server)
-		return nil, safeOperationError("SSH tunnel connection", err)
-	}
-	if s.closed.Load() {
-		_ = client.Close()
-		releaseTunnel(server)
-		return nil, errors.New("SSH service is closed")
-	}
-	listener, err := client.Listen("tcp", net.JoinHostPort(localHost, strconv.Itoa(request.LocalPort)))
-	if err != nil {
-		_ = client.Close()
-		releaseTunnel(server)
-		return nil, safeOperationError("SSH tunnel listener", err)
-	}
-
-	id := fmt.Sprintf("tunnel-%d", s.nextTunnel.Add(1))
-	tunnel := &Tunnel{
-		id:          id,
-		server:      server,
-		client:      client,
-		listener:    listener,
-		service:     s,
-		connections: make(chan struct{}, 64),
-	}
-	s.mu.Lock()
-	if s.closed.Load() {
-		s.mu.Unlock()
-		_ = listener.Close()
-		_ = client.Close()
-		release(server)
-		return nil, errors.New("SSH service is closed")
-	}
-	s.tunnels[id] = tunnel
-	s.mu.Unlock()
-	go tunnel.acceptLoop(remoteHost, request.RemotePort)
-
-	address, _ := listener.Addr().(*net.TCPAddr)
-	localPort := request.LocalPort
-	if address != nil {
-		localPort = address.Port
-	}
-	log.Printf("audit operation=ssh_tunnel_open server=%s tunnel=%s local=%s:%d remote=%s:%d", server.ID, id, localHost, localPort, remoteHost, request.RemotePort)
-	return map[string]any{
-		"tunnelId":   id,
-		"serverId":   server.ID,
-		"localHost":  localHost,
-		"localPort":  localPort,
-		"remoteHost": remoteHost,
-		"remotePort": request.RemotePort,
-		"warning":    "The tunnel remains active until ssh_tunnel_close or process exit",
-	}, nil
-}
-
-func (s *Service) CloseTunnel(_ context.Context, id string) (map[string]any, error) {
-	id = strings.TrimSpace(id)
-	if id == "" {
-		return nil, errors.New("tunnelId is required")
-	}
-	s.mu.Lock()
-	tunnel := s.tunnels[id]
-	if tunnel != nil {
-		delete(s.tunnels, id)
-	}
-	s.mu.Unlock()
-	if tunnel == nil {
-		return nil, errors.New("unknown tunnelId")
-	}
-	tunnel.Close()
-	return map[string]any{"tunnelId": id, "closed": true}, nil
-}
-
-func (s *Service) ListTunnels() []map[string]any {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	tunnels := make([]*Tunnel, 0, len(s.tunnels))
-	for _, tunnel := range s.tunnels {
-		tunnels = append(tunnels, tunnel)
-	}
-	sort.Slice(tunnels, func(i, j int) bool { return tunnels[i].id < tunnels[j].id })
-	items := make([]map[string]any, 0, len(tunnels))
-	for _, tunnel := range tunnels {
-		localHost := ""
-		localPort := 0
-		if address, ok := tunnel.listener.Addr().(*net.TCPAddr); ok {
-			localHost = address.IP.String()
-			localPort = address.Port
-		}
-		items = append(items, map[string]any{
-			"tunnelId":  tunnel.id,
-			"serverId":  tunnel.server.ID,
-			"localHost": localHost,
-			"localPort": localPort,
-			"open":      true,
-		})
-	}
-	return items
-}
-
+// Close shuts the service down and closes every open tunnel. In-flight
+// operations are interrupted by their own contexts.
 func (s *Service) Close() {
 	if !s.closed.CompareAndSwap(false, true) {
 		return
 	}
 	s.mu.Lock()
 	tunnels := make([]*Tunnel, 0, len(s.tunnels))
-	for id, tunnel := range s.tunnels {
-		delete(s.tunnels, id)
+	for _, tunnel := range s.tunnels {
 		tunnels = append(tunnels, tunnel)
 	}
 	s.mu.Unlock()
 	for _, tunnel := range tunnels {
-		tunnel.Close()
+		tunnel.Close("service shutdown")
 	}
 }
 
-func (t *Tunnel) Close() {
-	t.closeOnce.Do(func() {
-		_ = t.listener.Close()
-		_ = t.client.Close()
-		releaseTunnel(t.server)
-	})
-}
-
-func (t *Tunnel) acceptLoop(remoteHost string, remotePort int) {
-	defer func() {
-		t.service.removeTunnel(t.id, t)
-		t.Close()
-	}()
-	remoteAddress := net.JoinHostPort(remoteHost, strconv.Itoa(remotePort))
-	for {
-		local, err := t.listener.Accept()
-		if err != nil {
-			return
-		}
-		select {
-		case t.connections <- struct{}{}:
-			go func() {
-				defer func() { <-t.connections }()
-				t.proxy(local, remoteAddress)
-			}()
-		default:
-			_ = local.Close()
-		}
-	}
-}
-
-func (t *Tunnel) proxy(local net.Conn, remoteAddress string) {
-	remote, err := t.client.Dial("tcp", remoteAddress)
-	if err != nil {
-		_ = local.Close()
-		return
-	}
-	done := make(chan struct{}, 2)
-	go func() { _, _ = io.Copy(remote, local); closeWrite(remote); done <- struct{}{} }()
-	go func() { _, _ = io.Copy(local, remote); closeWrite(local); done <- struct{}{} }()
-	<-done
-	<-done
-	_ = local.Close()
-	_ = remote.Close()
-}
-
-func (s *Service) removeTunnel(id string, expected *Tunnel) {
-	s.mu.Lock()
-	if s.tunnels[id] == expected {
-		delete(s.tunnels, id)
-	}
-	s.mu.Unlock()
-}
-
-func closeWrite(conn net.Conn) {
-	if writer, ok := conn.(interface{ CloseWrite() error }); ok {
-		_ = writer.CloseWrite()
-	}
-}
-
-func (s *Service) withSFTP(ctx context.Context, server *config.ServerConfig, operation string, fn func(*sftp.Client) (map[string]any, error)) (map[string]any, error) {
-	return s.withClient(ctx, server, operation, func(client *ssh.Client) (map[string]any, error) {
-		sftpClient, err := sftp.NewClient(client)
-		if err != nil {
-			return nil, err
-		}
-		defer sftpClient.Close()
-		return fn(sftpClient)
-	})
-}
-
-func (s *Service) withClient(ctx context.Context, server *config.ServerConfig, operation string, fn func(*ssh.Client) (map[string]any, error)) (map[string]any, error) {
+// withClient acquires an operation slot, connects, and runs fn with a context
+// bounded by timeout. Connection time does not count against timeout.
+func (s *Service) withClient(ctx context.Context, server *config.ServerConfig, operation, detail string, timeout time.Duration, fn func(context.Context, *ssh.Client) (map[string]any, error)) (map[string]any, error) {
 	if s.closed.Load() {
-		return nil, errors.New("SSH service is closed")
+		return nil, errServiceClosed
 	}
-	if err := acquire(ctx, server); err != nil {
+	started := time.Now()
+	if err := acquireSlot(ctx, server); err != nil {
+		audit(operation, server, started, false, "busy "+detail)
 		return nil, err
 	}
-	defer release(server)
-	started := time.Now()
+	defer func() { <-server.Slots }()
+
 	client, err := s.connect(ctx, server)
 	if err != nil {
-		audit(operation, server, started, false, "connection_failed")
+		audit(operation, server, started, false, "connection_failed "+detail)
 		return nil, err
 	}
 	defer client.Close()
-	stopWatch := watchContext(ctx, client)
-	defer stopWatch()
-	result, err := fn(client)
-	audit(operation, server, started, err == nil, "")
+
+	operationCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	// Closing the client unblocks any SSH/SFTP call still waiting on the
+	// network once the operation is cancelled or times out.
+	stop := context.AfterFunc(operationCtx, func() { _ = client.Close() })
+	defer stop()
+
+	result, err := fn(operationCtx, client)
+	if err != nil && operationCtx.Err() != nil {
+		// The call most likely failed because the client was closed
+		// underneath it; report the timeout/cancellation instead.
+		err = operationCtx.Err()
+	}
+	audit(operation, server, started, err == nil, detail)
 	return result, err
 }
 
-func watchContext(ctx context.Context, client *ssh.Client) func() {
-	stop := make(chan struct{})
-	go func() {
-		select {
-		case <-ctx.Done():
-			_ = client.Close()
-		case <-stop:
-		}
-	}()
-	return func() { close(stop) }
-}
-
-func (s *Service) connect(ctx context.Context, server *config.ServerConfig) (*ssh.Client, error) {
-	var hostKeyCallback ssh.HostKeyCallback
-	if server.StrictHostKeyChecking && !config.AutoAcceptHostKeys() {
-		callback, err := knownhosts.New(server.KnownHostsPath)
-		if err != nil {
-			return nil, errors.New("known_hosts could not be loaded")
-		}
-		hostKeyCallback = callback
-	} else {
-		hostKeyCallback = ssh.InsecureIgnoreHostKey()
-	}
-
-	authMethods := make([]ssh.AuthMethod, 0, 2)
-	if server.PrivateKeyPath != "" {
-		keyData, err := os.ReadFile(filepath.Clean(server.PrivateKeyPath))
-		if err != nil {
-			return nil, errors.New("private key could not be read")
-		}
-		var signer ssh.Signer
-		if server.PrivateKeyPassphraseEnv != "" {
-			passphrase := os.Getenv(server.PrivateKeyPassphraseEnv)
-			if passphrase == "" {
-				return nil, errors.New("private key passphrase is unavailable")
-			}
-			signer, err = ssh.ParsePrivateKeyWithPassphrase(keyData, []byte(passphrase))
-		} else {
-			signer, err = ssh.ParsePrivateKey(keyData)
-		}
-		if err != nil {
-			return nil, errors.New("private key could not be parsed")
-		}
-		authMethods = append(authMethods, ssh.PublicKeys(signer))
-	}
-	if server.PasswordEnv != "" {
-		password := os.Getenv(server.PasswordEnv)
-		if password == "" {
-			return nil, errors.New("password credential is unavailable")
-		}
-		authMethods = append(authMethods, ssh.Password(password))
-		// Some servers (PAM-backed sshd, network appliances) only advertise
-		// keyboard-interactive rather than the "password" auth method, even
-		// for a plain username/password login. Answer every prompt with the
-		// configured password so those targets still authenticate.
-		authMethods = append(authMethods, ssh.KeyboardInteractive(func(_, _ string, questions []string, _ []bool) ([]string, error) {
-			answers := make([]string, len(questions))
-			for i := range answers {
-				answers[i] = password
-			}
-			return answers, nil
-		}))
-	}
-	if len(authMethods) == 0 {
-		return nil, errors.New("no SSH authentication method is configured")
-	}
-
-	sshConfig := &ssh.ClientConfig{
-		User:            server.Username,
-		Auth:            authMethods,
-		HostKeyCallback: hostKeyCallback,
-		Timeout:         time.Duration(server.ConnectTimeoutMs) * time.Millisecond,
-	}
-	address := net.JoinHostPort(server.Host, strconv.Itoa(server.Port))
-	dialer := &net.Dialer{Timeout: time.Duration(server.ConnectTimeoutMs) * time.Millisecond}
-	rawConn, err := dialer.DialContext(ctx, "tcp", address)
-	if err != nil {
-		return nil, err
-	}
-	conn, channels, requests, err := ssh.NewClientConn(rawConn, address, sshConfig)
-	if err != nil {
-		_ = rawConn.Close()
-		return nil, err
-	}
-	return ssh.NewClient(conn, channels, requests), nil
-}
-
-func (s *Service) server(id string) (*config.ServerConfig, error) {
-	id = strings.TrimSpace(id)
-	if id == "" {
-		return nil, errors.New("serverId is required")
-	}
-	server := s.catalog.Servers[id]
-	if server == nil {
-		return nil, errors.New("unknown serverId")
-	}
-	return server, nil
-}
-
-func (s *Service) sftpServer(id string) (*config.ServerConfig, error) {
-	server, err := s.server(id)
-	if err != nil {
-		return nil, err
-	}
-	if !server.AllowSFTP {
-		return nil, errors.New("SFTP is disabled for this server")
-	}
-	return server, nil
-}
-
-func acquire(ctx context.Context, server *config.ServerConfig) error {
+// acquireSlot waits for an operation slot for at most the time another
+// operation could legitimately hold one.
+func acquireSlot(ctx context.Context, server *config.ServerConfig) error {
+	wait := time.Duration(server.ConnectTimeoutMs+server.CommandTimeoutMs) * time.Millisecond
+	timer := time.NewTimer(wait)
+	defer timer.Stop()
 	select {
 	case server.Slots <- struct{}{}:
 		return nil
 	case <-ctx.Done():
 		return ctx.Err()
+	case <-timer.C:
+		return fmt.Errorf("server %q is busy: all %d operation slots are in use; retry later or raise maxConcurrentOperations", server.ID, server.MaxConcurrentOperations)
 	}
 }
 
-func release(server *config.ServerConfig) {
-	<-server.Slots
+func (s *Service) server(id string) (*config.ServerConfig, error) {
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return nil, errors.New("serverId is required; call ssh_list_servers to see configured ids")
+	}
+	server := s.catalog.Servers[id]
+	if server == nil {
+		return nil, fmt.Errorf("unknown serverId %q; configured ids: %s", id, strings.Join(s.serverIDs(), ", "))
+	}
+	return server, nil
 }
 
-func acquireTunnel(ctx context.Context, server *config.ServerConfig) error {
-	select {
-	case server.TunnelSlots <- struct{}{}:
-		return nil
-	case <-ctx.Done():
-		return ctx.Err()
+func (s *Service) sortedServers() []*config.ServerConfig {
+	servers := make([]*config.ServerConfig, 0, len(s.catalog.Servers))
+	for _, server := range s.catalog.Servers {
+		servers = append(servers, server)
 	}
+	sort.Slice(servers, func(i, j int) bool { return servers[i].ID < servers[j].ID })
+	return servers
 }
 
-func releaseTunnel(server *config.ServerConfig) {
-	<-server.TunnelSlots
+func (s *Service) serverIDs() []string {
+	servers := s.sortedServers()
+	ids := make([]string, len(servers))
+	for i, server := range servers {
+		ids[i] = server.ID
+	}
+	return ids
 }
 
-func checkCommandPolicy(server *config.ServerConfig, command string) error {
-	for _, pattern := range server.DeniedPatterns {
-		if pattern.MatchString(command) {
-			return errors.New("command rejected by the server command policy")
-		}
+func effectiveHostKeyPolicy(server *config.ServerConfig) string {
+	switch {
+	case config.AutoAcceptHostKeys():
+		return "auto-accept"
+	case !server.StrictHostKeyChecking:
+		return "disabled"
+	default:
+		return "strict"
 	}
-	if len(server.AllowedCommandPrefixes) == 0 {
-		return nil
-	}
-	if hasShellOperators(command) {
-		return errors.New("command contains shell operators that are not allowed with an allowlist")
-	}
-	trimmed := strings.TrimSpace(command)
-	for _, prefix := range server.AllowedCommandPrefixes {
-		prefix = strings.TrimSpace(prefix)
-		if trimmed == prefix {
-			return nil
-		}
-		if strings.HasPrefix(trimmed, prefix) && len(trimmed) > len(prefix) {
-			next, _ := utf8.DecodeRuneInString(trimmed[len(prefix):])
-			if unicode.IsSpace(next) {
-				return nil
-			}
-		}
-	}
-	return errors.New("command is not allowed by the server command policy")
-}
-
-func hasShellOperators(command string) bool {
-	if strings.IndexByte(command, '\x00') >= 0 || strings.IndexByte(command, '\n') >= 0 || strings.IndexByte(command, '\r') >= 0 {
-		return true
-	}
-	return strings.ContainsAny(command, ";|&<>$`(){}'\"\\")
-}
-
-func requiredPath(path string) (string, error) {
-	path = strings.TrimSpace(path)
-	if path == "" {
-		return "", errors.New("path is required")
-	}
-	return path, nil
 }
 
 func validateTimeout(requested, configured int64) (time.Duration, error) {
@@ -875,45 +324,21 @@ func validateExecOutput(requested, configured int) (int, error) {
 	return requested, nil
 }
 
-func fileInfoMap(info os.FileInfo, name string) map[string]any {
-	typeName := "other"
-	if info.IsDir() {
-		typeName = "directory"
-	} else if info.Mode().IsRegular() {
-		typeName = "file"
-	} else if info.Mode()&os.ModeSymlink != 0 {
-		typeName = "symlink"
-	}
-	result := map[string]any{
-		"name":        name,
-		"size":        info.Size(),
-		"type":        typeName,
-		"permissions": strconv.FormatUint(uint64(info.Mode().Perm()), 8),
-		"modified":    info.ModTime().UTC().Format(time.RFC3339Nano),
-	}
-	return result
-}
-
-func isLoopbackHost(host string) bool {
-	if strings.EqualFold(host, "localhost") || host == "127.0.0.1" || host == "::1" {
-		return true
-	}
-	ip := net.ParseIP(host)
-	return ip != nil && ip.IsLoopback()
-}
-
-func safeOperationError(operation string, err error) error {
-	if errors.Is(err, context.DeadlineExceeded) {
+// operationError converts an operation failure into a message that is safe
+// and useful to return to the model.
+func operationError(operation string, err error) error {
+	switch {
+	case errors.Is(err, context.DeadlineExceeded):
 		return fmt.Errorf("%s timed out", operation)
-	}
-	if errors.Is(err, context.Canceled) {
+	case errors.Is(err, context.Canceled):
 		return fmt.Errorf("%s was cancelled", operation)
+	default:
+		return fmt.Errorf("%s failed: %w", operation, err)
 	}
-	return fmt.Errorf("%s failed: %v", operation, err)
 }
 
 func audit(operation string, server *config.ServerConfig, started time.Time, success bool, detail string) {
-	if detail != "" {
+	if detail = strings.TrimSpace(detail); detail != "" {
 		detail = " " + detail
 	}
 	log.Printf("audit operation=%s server=%s success=%t durationMs=%d%s", operation, server.ID, success, time.Since(started).Milliseconds(), detail)
@@ -924,28 +349,40 @@ func hash(value string) string {
 	return hex.EncodeToString(digest[:8])
 }
 
+// limitedBuffer keeps at most limit bytes and records whether more arrived.
+// It is safe for concurrent use because a timed-out session may still be
+// delivering output while the result is being built.
 type limitedBuffer struct {
-	bytes.Buffer
+	mu        sync.Mutex
+	buffer    bytes.Buffer
 	limit     int
 	truncated bool
 }
 
 func (b *limitedBuffer) Write(data []byte) (int, error) {
-	remaining := b.limit - b.Len()
-	if remaining <= 0 {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	// Always report the full length so the session keeps draining the
+	// remote stream; excess bytes are counted as truncation, not errors.
+	kept := data
+	if remaining := b.limit - b.buffer.Len(); len(kept) > remaining {
 		b.truncated = true
-		return len(data), nil
+		kept = kept[:max(remaining, 0)]
 	}
-	if len(data) > remaining {
-		_, _ = b.Buffer.Write(data[:remaining])
-		b.truncated = true
-		return len(data), nil
-	}
-	return b.Buffer.Write(data)
+	b.buffer.Write(kept)
+	return len(data), nil
+}
+
+func (b *limitedBuffer) Truncated() bool {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.truncated
 }
 
 func (b *limitedBuffer) String() string {
-	data := b.Bytes()
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	data := b.buffer.Bytes()
 	if utf8.Valid(data) {
 		return string(data)
 	}
