@@ -29,7 +29,7 @@ Run Java build and packaging commands from the `java` directory. The shared conf
 
 ## Configure targets
 
-Copy `config/servers.example.json` to `config/servers.json` from the repository root. Each entry has a unique `id`; the model sends that id to every SSH tool, so one server process can safely manage multiple targets.
+Copy `config/servers.example.json` to `config/servers.json` from the repository root (the `$schema` reference gives editor completion). Each entry has a unique `id`; the model sends that id to every SSH tool, so one server process can safely manage multiple targets.
 
 Credentials are deliberately indirect:
 
@@ -59,17 +59,27 @@ Do not use `StrictHostKeyChecking=no` in production. An explicit insecure except
 
 For a temporary compatibility/emergency mode only, `SSH_MCP_AUTO_ACCEPT_HOST_KEYS=true` accepts new and changed host keys for every configured target, even when strict checking is enabled. This disables MITM protection; keep it unset in normal or production use.
 
+## Command line
+
+```text
+ssh-mcp-server [--config <path>] [--validate [--connect]] [--version]
+```
+
+- `--config <path>` — the configuration file. Without it the server uses `-Dssh.mcp.config`, then `SSH_MCP_CONFIG`, then the first existing `./config/servers.json`, `servers.json` or `config/servers.json` next to the jar, `../config/servers.json` from the jar (packaged layouts), or `<user config dir>/ssh-mcp/servers.json`.
+- `--validate` — checks credentials, key files, and `known_hosts` entries for every server, prints a report, and exits non-zero if anything is missing. Add `--connect` to also log in. See the [Go guide](../go/README.md#4-validate-the-setup) for sample output; both implementations print the same report.
+- `--version` — prints the version from the jar manifest.
+
 ## MCP client configuration
 
-Point the client at the launcher or the JAR. Example shape for a client that supports MCP server configuration:
+Point the client at the launcher or the JAR, using absolute paths:
 
 ```json
 {
   "mcpServers": {
     "ssh": {
       "command": "C:\\path\\to\\dist\\bin\\ssh-mcp-server.cmd",
+      "args": ["--config", "C:\\path\\to\\config\\servers.json"],
       "env": {
-        "SSH_MCP_CONFIG": "C:\\path\\to\\config\\servers.json",
         "SSH_MCP_STAGING_PASSWORD": "injected-by-the-client-secret-store"
       }
     }
@@ -77,22 +87,19 @@ Point the client at the launcher or the JAR. Example shape for a client that sup
 }
 ```
 
-On Unix, use `dist/bin/ssh-mcp-server`. You can also use `java -jar target/ssh-mcp-server.jar`; the configuration path defaults to `config/servers.json` and can be overridden with `SSH_MCP_CONFIG` or `-Dssh.mcp.config=...`.
+On Unix, use `dist/bin/ssh-mcp-server`, or `java -jar /path/to/ssh-mcp-server.jar --config /path/to/servers.json`.
 
-## Tools
+## Tools and behavior
 
-- `ssh_list_servers` — non-secret target metadata and capabilities.
-- `ssh_exec` — bounded remote command execution with timeout, output cap, audit hash, and optional allow/deny command policy.
-- `sftp_list`, `sftp_stat`, `sftp_read_file`, `sftp_write_file`, `sftp_mkdir`, `sftp_delete` — remote file operations. Reads have explicit byte limits; writes accept UTF-8 or base64 data.
-- `ssh_tunnel_open`, `ssh_tunnel_close`, `ssh_tunnel_list` — optional local TCP forwarding. Forwarding is disabled by default, and binds are loopback-only.
+The tool set, argument names, and result shapes are identical to the Go implementation. See [skills/ssh-mcp/references/tools.md](../skills/ssh-mcp/references/tools.md). Tool calls return the result JSON as text and as `structuredContent`. Errors carry `{"errorCode", "message"}` with `isError: true`.
 
-Configuration rejects unknown root/server fields. With `allowedCommandPrefixes`, command matching requires a complete prefix boundary and rejects shell-control characters; this conservative rule prevents common shell-chaining bypasses. Command and SFTP operations are bounded by the configured timeout, and timed-out work closes its SSH connection.
+- **Concurrency.** Tool calls run on a bounded worker pool (64 at most), so a long `ssh_exec` never blocks `ping` or calls to other servers. Per-server limits come from `maxConcurrentOperations` and `maxConcurrentTunnels`, which are separate pools. `notifications/cancelled` interrupts the matching call.
+- **Timeouts.** A command that exceeds `timeoutMs` returns `timedOut: true` with whatever output was captured; it is not an error. Connection time is not counted against the command timeout.
+- **Tunnels** send SSH heartbeats and are closed automatically when the connection drops.
+- **Keyboard-interactive.** `passwordEnv` also answers a lone, hidden, password-style keyboard-interactive prompt (Apache MINA SSHD's heuristic), so it works against servers that only advertise `keyboard-interactive`.
+- **stdout is reserved for MCP.** `System.out` is redirected to stderr at startup, so library output can never corrupt the protocol stream. Messages are framed with `\n` on every platform.
 
-`maxConcurrentOperations` (default 4) bounds concurrent `ssh_exec`/`sftp_*` calls per server. `maxConcurrentTunnels` (default 4) bounds concurrent open port forwards per server, using a separate permit pool — a long-lived tunnel never consumes an exec/SFTP slot, so tunnels cannot starve command execution on the same target and vice versa.
-
-Password authentication (`passwordEnv`) also satisfies single-prompt keyboard-interactive challenges automatically (Apache MINA SSHD answers a lone, non-echoed, password-looking prompt with the configured password), so it works against servers that only advertise `keyboard-interactive`.
-
-`ssh_exec` is intentionally powerful. The remote account’s Unix/Windows permissions remain the primary security boundary. For production, use a least-privilege account and set `allowedCommandPrefixes` or `deniedCommandRegexes` for each target. SFTP and forwarding can be disabled independently.
+`ssh_exec` is intentionally powerful. The remote account's permissions remain the primary security boundary. For production, use a least-privilege account and set `allowedCommandPrefixes` or `deniedCommandRegexes` for each target.
 
 ## Executable packaging without Java installed
 

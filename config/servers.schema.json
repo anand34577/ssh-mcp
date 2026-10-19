@@ -1,0 +1,57 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/anand34577/ssh-mcp/config/servers.schema.json",
+  "title": "SSH MCP Server configuration",
+  "description": "Targets the SSH MCP server may connect to. Secrets are never stored here: passwords and key passphrases are referenced by environment variable name.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["servers"],
+  "properties": {
+    "$schema": { "type": "string", "description": "Editor hint; ignored by the server." },
+    "servers": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "$ref": "#/$defs/server" }
+    }
+  },
+  "$defs": {
+    "envName": {
+      "type": "string",
+      "pattern": "^[A-Za-z_][A-Za-z0-9_]{0,127}$"
+    },
+    "server": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "host", "username"],
+      "anyOf": [{ "required": ["passwordEnv"] }, { "required": ["privateKeyPath"] }],
+      "properties": {
+        "id": { "type": "string", "pattern": "^[A-Za-z0-9._-]{1,64}$", "description": "Unique id; the serverId every tool call uses." },
+        "host": { "type": "string", "minLength": 1, "description": "Hostname or IP address." },
+        "port": { "type": "integer", "minimum": 1, "maximum": 65535, "default": 22 },
+        "username": { "type": "string", "minLength": 1, "description": "Remote SSH username." },
+        "passwordEnv": { "$ref": "#/$defs/envName", "description": "Name of the environment variable holding the password (not the password itself)." },
+        "privateKeyPath": { "type": "string", "minLength": 1, "description": "Private key file. Supports ${user.home}, ${ENV_VAR}, and ~/." },
+        "privateKeyPassphraseEnv": { "$ref": "#/$defs/envName", "description": "Name of the environment variable holding the key passphrase." },
+        "knownHostsPath": { "type": "string", "minLength": 1, "description": "known_hosts file; required while strictHostKeyChecking is true." },
+        "strictHostKeyChecking": { "type": "boolean", "default": true, "description": "false also requires SSH_MCP_ALLOW_INSECURE_HOST_KEYS=true." },
+        "connectTimeoutMs": { "type": "integer", "minimum": 1000, "maximum": 120000, "default": 10000, "description": "TCP connect + SSH handshake + authentication timeout." },
+        "commandTimeoutMs": { "type": "integer", "minimum": 100, "maximum": 3600000, "default": 60000, "description": "Default and maximum ssh_exec / SFTP operation timeout." },
+        "maxOutputBytes": { "type": "integer", "minimum": 1024, "maximum": 104857600, "default": 1048576, "description": "Cap per stdout/stderr stream and per SFTP read/write." },
+        "maxConcurrentOperations": { "type": "integer", "minimum": 1, "maximum": 64, "default": 4 },
+        "maxConcurrentTunnels": { "type": "integer", "minimum": 1, "maximum": 64, "default": 4 },
+        "allowSftp": { "type": "boolean", "default": true },
+        "allowPortForwarding": { "type": "boolean", "default": false },
+        "allowedCommandPrefixes": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1, "pattern": "^[^;|&<>$`(){}'\"\\\\]+$" },
+          "description": "When non-empty, commands must start with one of these at a word boundary and shell metacharacters are rejected."
+        },
+        "deniedCommandRegexes": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 },
+          "description": "Regular expressions; any match rejects the command. Use the RE2/Java-compatible subset."
+        }
+      }
+    }
+  }
+}

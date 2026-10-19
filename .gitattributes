@@ -1,0 +1,11 @@
+# Normalize line endings so gofmt, shell scripts, and diffs behave the same on
+# every platform, including Windows checkouts with core.autocrlf=true.
+* text=auto eol=lf
+
+*.cmd text eol=crlf
+*.bat text eol=crlf
+*.ps1 text eol=crlf
+
+*.jar binary
+*.png binary
+*.exe binary

@@ -1,0 +1,93 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="640" viewBox="0 0 1600 640" role="img" aria-label="How SSH MCP works: your AI app talks to SSH MCP on your computer, which connects to your servers over SSH">
+  <defs>
+    <linearGradient id="brand" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#22D3EE"/>
+      <stop offset="0.55" stop-color="#6366F1"/>
+      <stop offset="1" stop-color="#A855F7"/>
+    </linearGradient>
+    <radialGradient id="glow" cx="0.5" cy="0.5" r="0.5">
+      <stop offset="0" stop-color="#6366F1" stop-opacity="0.25"/>
+      <stop offset="1" stop-color="#6366F1" stop-opacity="0"/>
+    </radialGradient>
+    <marker id="arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto">
+      <path d="M0 0 L10 5 L0 10 Z" fill="#67E8F9"/>
+    </marker>
+    <clipPath id="frame"><rect width="1600" height="640" rx="28"/></clipPath>
+    <style>
+      .sans { font-family: Inter, 'Segoe UI', -apple-system, BlinkMacSystemFont, Roboto, Helvetica, Arial, sans-serif; }
+      .card { fill: #111A2E; stroke: #FFFFFF; stroke-opacity: 0.10; }
+      .icon { fill: none; stroke: #67E8F9; stroke-width: 3; stroke-linecap: round; stroke-linejoin: round; }
+      .title { font-size: 30px; font-weight: 700; fill: #F1F5F9; }
+      .body { font-size: 20px; fill: #94A3B8; }
+      .label { font-size: 18px; font-weight: 600; fill: #67E8F9; }
+    </style>
+  </defs>
+  <g clip-path="url(#frame)">
+    <rect width="1600" height="640" fill="#0B1220"/>
+    <ellipse cx="800" cy="320" rx="520" ry="300" fill="url(#glow)"/>
+
+    <text x="800" y="96" text-anchor="middle" class="sans" font-size="48" font-weight="800" fill="#FFFFFF" letter-spacing="-1">How it works</text>
+
+    <g class="sans">
+      <!-- AI app -->
+      <g transform="translate(96 160)">
+        <rect class="card" width="400" height="300" rx="24"/>
+        <path class="icon" transform="translate(176 44)" d="M8 10 H40 A4 4 0 0 1 44 14 V32 A4 4 0 0 1 40 36 H22 L13 43 V36 H8 A4 4 0 0 1 4 32 V14 A4 4 0 0 1 8 10 Z M14 20 H34 M14 27 H27"/>
+        <text class="title" x="200" y="146" text-anchor="middle">Your AI app</text>
+        <text class="body" x="200" y="190" text-anchor="middle">Claude, Cursor, VS Code,</text>
+        <text class="body" x="200" y="220" text-anchor="middle">Windsurf, and others</text>
+      </g>
+
+      <!-- SSH MCP -->
+      <g transform="translate(600 140)">
+        <rect width="400" height="340" rx="26" fill="url(#brand)"/>
+        <rect x="3" y="3" width="394" height="334" rx="24" fill="#111A2E"/>
+        <g transform="translate(170 34) scale(0.117)">
+          <rect x="16" y="16" width="480" height="480" rx="112" fill="url(#brand)"/>
+          <path d="M136 184 L228 260 L136 336" fill="none" stroke="#FFFFFF" stroke-width="44" stroke-linecap="round" stroke-linejoin="round"/>
+          <rect x="262" y="316" width="118" height="42" rx="21" fill="#FFFFFF"/>
+          <path d="M372 104 C378 142 390 154 428 160 C390 166 378 178 372 216 C366 178 354 166 316 160 C354 154 366 142 372 104 Z" fill="#FFFFFF"/>
+        </g>
+        <text class="title" x="200" y="140" text-anchor="middle">SSH MCP</text>
+        <text class="body" x="200" y="172" text-anchor="middle">on your computer</text>
+        <g class="body" fill="#CBD5E1">
+          <path d="M84 211 L91 218 L103 204" fill="none" stroke="#34D399" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
+          <text x="118" y="219" fill="#CBD5E1">Keeps your keys safe</text>
+          <path d="M84 251 L91 258 L103 244" fill="none" stroke="#34D399" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
+          <text x="118" y="259" fill="#CBD5E1">Follows your rules</text>
+          <path d="M84 291 L91 298 L103 284" fill="none" stroke="#34D399" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
+          <text x="118" y="299" fill="#CBD5E1">Logs every action</text>
+        </g>
+      </g>
+
+      <!-- Servers -->
+      <g transform="translate(1104 160)">
+        <rect class="card" width="400" height="300" rx="24"/>
+        <g class="icon" transform="translate(176 40)">
+          <rect x="4" y="4" width="40" height="16" rx="4"/>
+          <rect x="4" y="28" width="40" height="16" rx="4"/>
+          <path d="M12 12 H13 M12 36 H13"/>
+        </g>
+        <text class="title" x="200" y="146" text-anchor="middle">Your servers</text>
+        <text class="body" x="200" y="190" text-anchor="middle">Cloud, home lab, Raspberry Pi:</text>
+        <text class="body" x="200" y="220" text-anchor="middle">anything you can SSH into</text>
+      </g>
+
+      <!-- Arrows -->
+      <line x1="506" y1="310" x2="588" y2="310" stroke="#67E8F9" stroke-width="3" marker-end="url(#arrow)"/>
+      <text class="label" x="548" y="290" text-anchor="middle">asks</text>
+      <line x1="1010" y1="310" x2="1092" y2="310" stroke="#67E8F9" stroke-width="3" marker-end="url(#arrow)"/>
+      <text class="label" x="1052" y="290" text-anchor="middle">SSH</text>
+
+      <!-- Promise -->
+      <g transform="translate(800 548)">
+        <rect x="-300" y="-34" width="600" height="68" rx="34" fill="#34D399" fill-opacity="0.10" stroke="#34D399" stroke-opacity="0.35"/>
+        <g transform="translate(-246 -16)" fill="none" stroke="#34D399" stroke-width="3" stroke-linecap="round" stroke-linejoin="round">
+          <rect x="2" y="13" width="24" height="18" rx="4"/>
+          <path d="M7 13 V9 A7 7 0 0 1 21 9 V13"/>
+        </g>
+        <text x="20" y="8" text-anchor="middle" font-size="22" font-weight="600" fill="#A7F3D0">Your passwords never reach the AI</text>
+      </g>
+    </g>
+  </g>
+</svg>

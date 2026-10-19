@@ -68,6 +68,49 @@ class ConfigTest {
         assertThrows(Exception.class, () -> Config.ServerConfig.from(node));
     }
 
+    @Test
+    void rejectsUnusableValues() {
+        String[][] cases = {
+                { "port", "0" }, { "commandTimeoutMs", "50" }, { "maxOutputBytes", "\"big\"" },
+                { "passwordEnv", "\"hunter2 secret\"" }, { "allowedCommandPrefixes", "[\"ls;\"]" },
+                { "deniedCommandRegexes", "[\"(\"]" },
+        };
+        for (String[] item : cases) {
+            ObjectNode node = baseServer();
+            try {
+                node.set(item[0], mapper.readTree(item[1]));
+            }
+            catch (Exception ex) {
+                throw new AssertionError(ex);
+            }
+            assertThrows(Exception.class, () -> Config.ServerConfig.from(node), item[0] + "=" + item[1]);
+        }
+    }
+
+    @Test
+    void parseAcceptsSchemaAndRejectsUnknownRootFields() throws Exception {
+        Path knownHosts = Files.createFile(tempDir.resolve("known_hosts_schema"));
+        String server = "{\"id\":\"a\",\"host\":\"h\",\"username\":\"u\",\"passwordEnv\":\"A\",\"knownHostsPath\":"
+                + mapper.writeValueAsString(knownHosts.toString()) + "}";
+        Config.ServerCatalog catalog = Config.parse(mapper,
+                new java.io.StringReader("{\"$schema\":\"./servers.schema.json\",\"servers\":[" + server + "]}"), tempDir);
+        assertEquals(1, catalog.servers().size());
+        assertThrows(Exception.class, () -> Config.parse(mapper,
+                new java.io.StringReader("{\"servers\":[" + server + "],\"extra\":1}"), tempDir));
+        assertThrows(Exception.class, () -> Config.parse(mapper,
+                new java.io.StringReader("{\"servers\":[" + server + "," + server + "]}"), tempDir));
+    }
+
+    @Test
+    void expandResolvesHomeAndNeverLoops() {
+        String home = System.getProperty("user.home");
+        assertEquals(home + "/k", Config.expand("${user.home}/k"));
+        assertEquals(java.nio.file.Paths.get(home, "k").toString(), Config.expand("~/k"));
+        // An unresolvable or self-referencing value must terminate.
+        assertEquals("/x", Config.expand("${SSH_MCP_SURELY_UNSET_VARIABLE}/x"));
+        assertEquals("plain", Config.expand("plain"));
+    }
+
     private ObjectNode baseServer() {
         ObjectNode node = mapper.createObjectNode();
         node.put("id", "test");

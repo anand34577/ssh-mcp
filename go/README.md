@@ -1,184 +1,132 @@
 # Go SSH MCP Server — Usage Guide
 
-This is a standalone MCP server that lets an MCP client connect to one or more configured SSH servers. It supports remote command execution, SFTP file operations, and optional loopback-only SSH TCP tunnels.
+A single self-contained binary that lets an MCP client run commands, transfer files over SFTP, and open loopback-only TCP tunnels on SSH servers you configure in advance. The target machine needs no Go, Java, or other runtime.
 
-The release binaries are self-contained Go executables. The target machine does not need Go, Java, a JDK, a JRE, Visual Studio, or TDM-GCC.
+## The quick way
 
-## Choose the correct binary
+The one-line installers in the repository root download the right binary, verify its checksum, install it per user, and start the guided setup:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/anand34577/ssh-mcp/main/install.sh | sh          # macOS / Linux
+irm https://raw.githubusercontent.com/anand34577/ssh-mcp/main/install.ps1 | iex               # Windows PowerShell
+```
+
+The binary manages its own lifecycle:
+
+| Command | What it does |
+|---|---|
+| `setup [-config file]` | Interactive: add a server (host-key fingerprint confirmation, sign-in test, optional look-only policy), test, remove, connect apps. Also runs when the binary is started from a terminal with no arguments, or double-clicked. |
+| `connect [-app ids]` | Non-interactive: registers the server with Claude Desktop, Claude Code (`claude mcp add --scope user`), Codex (`~/.codex/config.toml`), Gemini CLI, Cursor, Windsurf, and VS Code. It reuses secrets already stored in any app's `env` block, backs up each file to `.bak`, and leaves files with comments untouched. |
+| `update` | Downloads the release asset for this platform, verifies it against its `.sha256`, and atomically replaces the binary (on Windows, by renaming the running binary aside). Honors `SSH_MCP_VERSION` and `SSH_MCP_DOWNLOAD_URL`. |
+| `uninstall [-purge] [-yes]` | Removes the registration from every app, optionally deletes `servers.json`, and deletes the binary. `known_hosts` and keys are never touched. |
+
+Nothing contacts the network except SSH connections and an explicit `update`: there is no telemetry and no background update check.
+
+The manual steps below are for people who want full control.
+
+## 1. Choose the binary
 
 | Target system | Binary |
 |---|---|
-| Windows 64-bit Intel/AMD | `dist/ssh-mcp-server-windows-amd64.exe` |
-| Linux 64-bit Intel/AMD | `dist/ssh-mcp-server-linux-amd64` |
-| Linux 64-bit ARM | `dist/ssh-mcp-server-linux-arm64` |
+| Windows x86-64 / ARM64 | `ssh-mcp-server-windows-amd64.exe` / `ssh-mcp-server-windows-arm64.exe` |
+| Linux x86-64 / ARM64 | `ssh-mcp-server-linux-amd64` / `ssh-mcp-server-linux-arm64` |
+| macOS Intel / Apple silicon | `ssh-mcp-server-darwin-amd64` / `ssh-mcp-server-darwin-arm64` |
 
-The binaries are operating-system and CPU specific. Do not run the Linux binary directly on Windows or use the ARM64 binary on an x86_64 machine.
+Download from the [Releases page](https://github.com/anand34577/ssh-mcp/releases) and verify it with `sha256sum -c <binary>.sha256`. On Linux and macOS run `chmod +x <binary>`; on macOS you may also need `xattr -d com.apple.quarantine <binary>`. Check it runs with `<binary> -version`.
 
-## 1. Create the configuration
+## 2. Create the configuration
 
-From the repository root, copy the template:
-
-```powershell
-Copy-Item .\config\servers.example.json .\config\servers.json
+```bash
+cp config/servers.example.json config/servers.json      # PowerShell: Copy-Item
 ```
 
-Edit `config/servers.json`. A configuration can contain multiple SSH targets:
+`servers.example.json` references `servers.schema.json`, so VS Code and other editors offer completion and validation as you edit. A minimal password-auth target:
 
 ```json
 {
+  "$schema": "./servers.schema.json",
   "servers": [
-    {
-      "id": "production",
-      "host": "server.example.com",
-      "port": 22,
-      "username": "deploy",
-      "privateKeyPath": "${user.home}/.ssh/id_ed25519",
-      "privateKeyPassphraseEnv": "SSH_MCP_PRODUCTION_KEY_PASSPHRASE",
-      "knownHostsPath": "${user.home}/.ssh/known_hosts",
-      "strictHostKeyChecking": true,
-      "connectTimeoutMs": 10000,
-      "commandTimeoutMs": 60000,
-      "maxOutputBytes": 1048576,
-      "maxConcurrentOperations": 4,
-      "maxConcurrentTunnels": 4,
-      "allowSftp": true,
-      "allowPortForwarding": false,
-      "allowedCommandPrefixes": [],
-      "deniedCommandRegexes": [
-        "(?i).*\\b(shutdown|reboot|poweroff)\\b.*"
-      ]
-    },
     {
       "id": "staging",
       "host": "staging.example.com",
-      "port": 22,
       "username": "ops",
       "passwordEnv": "SSH_MCP_STAGING_PASSWORD",
-      "knownHostsPath": "${user.home}/.ssh/known_hosts",
-      "strictHostKeyChecking": true
+      "knownHostsPath": "~/.ssh/known_hosts"
     }
   ]
 }
 ```
 
-Important configuration rules:
+Every field, default, and limit is documented in the [configuration reference](../README.md#configuration-reference). The important rules:
 
-- Every server needs a unique `id`. The MCP client uses this value as `serverId`.
-- Configure either `passwordEnv`, `privateKeyPath`, or both.
-- `passwordEnv` and `privateKeyPassphraseEnv` contain environment-variable names, not secret values.
-- Inline `password`, `passphrase`, `privateKey`, `privateKeyContent`, and `secret` fields are rejected.
-- Strict host-key verification is enabled by default and requires an existing `knownHostsPath`.
-- For an explicitly temporary compatibility/emergency mode, set `SSH_MCP_AUTO_ACCEPT_HOST_KEYS=true`; this accepts new and changed host keys for every configured target and disables MITM protection. Keep it unset in normal or production use.
-- SFTP is enabled by default when `allowSftp` is omitted.
-- Port forwarding is disabled by default.
-- `maxOutputBytes`, `commandTimeoutMs`, and `maxConcurrentOperations` protect the server from unbounded work.
-- `maxConcurrentOperations` bounds concurrent `ssh_exec`/`sftp_*` calls per server; `maxConcurrentTunnels` bounds concurrent open port forwards per server, independently. A long-lived tunnel never consumes an exec/SFTP slot (or vice versa), so opening several tunnels cannot starve command execution on the same target.
-- Password authentication also answers single-prompt keyboard-interactive challenges (common on PAM-backed servers) with the same `passwordEnv` value, so `passwordEnv` works whether the server advertises `password` or `keyboard-interactive`.
-- Unknown root/server fields are rejected. If `allowedCommandPrefixes` is non-empty, shell-control characters and prefix lookalikes are rejected; configure simple command prefixes accordingly.
+- Each `id` is unique; tools address targets by it as `serverId`.
+- `passwordEnv` and `privateKeyPassphraseEnv` contain environment-variable **names**. Inline `password`, `passphrase`, `privateKey`, `privateKeyContent`, and `secret` fields are rejected.
+- Configure `passwordEnv`, `privateKeyPath`, or both. The password also answers single hidden-prompt keyboard-interactive challenges, which PAM-backed servers often use.
+- Unknown fields and out-of-range values are errors, so a typo never silently weakens security.
 
-Protect `servers.json`, private keys, and the process environment with the operating system account permissions.
+### Where the configuration is found
 
-## 2. Prepare host-key verification
+1. `-config <path>`
+2. `SSH_MCP_CONFIG`
+3. The first existing file among `./config/servers.json`, `servers.json` or `config/servers.json` next to the binary, and `<user config dir>/ssh-mcp/servers.json` (`%APPDATA%` on Windows, `~/Library/Application Support` on macOS, `$XDG_CONFIG_HOME` or `~/.config` on Linux).
 
-Populate `known_hosts` through a trusted administrative process. Verify the server fingerprint out of band before trusting it:
+MCP clients start servers from unpredictable working directories, so pass `-config` with an absolute path, or put `servers.json` next to the binary.
+
+## 3. Trust the host keys
+
+Strict `known_hosts` verification is on by default. Verify each server's fingerprint out of band, then record it:
 
 ```bash
-ssh-keyscan -H server.example.com >> ~/.ssh/known_hosts
+ssh-keyscan -p 22 staging.example.com >> ~/.ssh/known_hosts
+ssh-keygen -lf ~/.ssh/known_hosts     # compare with the fingerprint you were given
 ```
 
-Do not disable host-key verification in production. An insecure exception requires both:
+The client negotiates only the host-key types recorded for that host, so a `known_hosts` file holding just one key type (for example only ECDSA) works even when the server prefers another.
+
+Disabling verification for one target requires both `"strictHostKeyChecking": false` and `SSH_MCP_ALLOW_INSECURE_HOST_KEYS=true`. `SSH_MCP_AUTO_ACCEPT_HOST_KEYS=true` disables it for every target. Both are emergency switches only.
+
+## 4. Validate the setup
+
+Run the built-in check before wiring up a client. It touches no remote state:
+
+```bash
+export SSH_MCP_STAGING_PASSWORD='…'
+./ssh-mcp-server-linux-amd64 -config /opt/ssh-mcp/servers.json -validate            # offline checks
+./ssh-mcp-server-linux-amd64 -config /opt/ssh-mcp/servers.json -validate -connect   # also log in
+```
 
 ```text
-strictHostKeyChecking: false
-SSH_MCP_ALLOW_INSECURE_HOST_KEYS=true
+Configuration: /opt/ssh-mcp/servers.json
+
+[OK (connected)] staging (staging.example.com:22)
+
+[FAIL] production (server.example.com:22)
+  error:   environment variable SSH_MCP_PRODUCTION_KEY_PASSPHRASE (privateKeyPassphraseEnv for server "production") is not set or empty in the MCP server process
+  error:   host server.example.com:22 is not in /home/me/.ssh/known_hosts; verify its fingerprint, then run: ssh-keyscan -p 22 server.example.com >> /home/me/.ssh/known_hosts
+
+1 of 2 server(s) ready.
 ```
 
-## 3. Provide credentials securely
+The exit code is 0 only when every server is ready.
 
-The LLM never receives the password or private-key contents. The MCP client starts the server with the required environment variables, and the Go process reads them only when it opens an SSH connection.
+## 5. Configure the MCP client
 
-### Windows PowerShell
+Supply the credentials through the client's `env` block (ideally from a secret store), not your shell profile.
 
-```powershell
-$env:SSH_MCP_CONFIG = 'C:\path\to\ssh-mcp\config\servers.json'
-$env:SSH_MCP_STAGING_PASSWORD = 'injected-by-your-secret-store'
-$env:SSH_MCP_PRODUCTION_KEY_PASSPHRASE = 'injected-by-your-secret-store'
-```
-
-### Linux
+Claude Code:
 
 ```bash
-export SSH_MCP_CONFIG=/opt/ssh-mcp/config/servers.json
-export SSH_MCP_STAGING_PASSWORD='injected-by-your-secret-store'
-export SSH_MCP_PRODUCTION_KEY_PASSPHRASE='injected-by-your-secret-store'
+claude mcp add ssh --env SSH_MCP_STAGING_PASSWORD=… -- /opt/ssh-mcp/ssh-mcp-server-linux-amd64 -config /opt/ssh-mcp/servers.json
 ```
 
-Prefer the MCP client's secret manager or service-account environment rather than storing credentials in shell history.
-
-## 4. Run the server directly
-
-The `-config` option is explicit and recommended. If omitted, the server checks `SSH_MCP_CONFIG`, then uses `config/servers.json` relative to its working directory.
-
-### Windows AMD64
-
-```powershell
-& 'C:\path\to\ssh-mcp\go\dist\ssh-mcp-server-windows-amd64.exe' `
-  -config 'C:\path\to\ssh-mcp\config\servers.json'
-```
-
-### Linux AMD64
-
-```bash
-chmod +x ./dist/ssh-mcp-server-linux-amd64
-./dist/ssh-mcp-server-linux-amd64 \
-  -config /opt/ssh-mcp/config/servers.json
-```
-
-### Linux ARM64
-
-```bash
-chmod +x ./dist/ssh-mcp-server-linux-arm64
-./dist/ssh-mcp-server-linux-arm64 \
-  -config /opt/ssh-mcp/config/servers.json
-```
-
-The server uses MCP stdio transport. JSON-RPC is read from standard input and responses are written to standard output. Logs go to standard error; do not redirect diagnostic output into the MCP protocol stream.
-
-## 5. Configure an MCP client
-
-Use the appropriate executable as the MCP server command. The exact configuration key can vary by MCP client, but the shape is commonly:
-
-### Windows
+Claude Desktop and other clients using the `mcpServers` format:
 
 ```json
 {
   "mcpServers": {
     "ssh": {
-      "command": "C:\\path\\to\\ssh-mcp\\go\\dist\\ssh-mcp-server-windows-amd64.exe",
-      "args": [
-        "-config",
-        "C:\\path\\to\\ssh-mcp\\config\\servers.json"
-      ],
-      "env": {
-        "SSH_MCP_STAGING_PASSWORD": "injected-by-your-secret-store",
-        "SSH_MCP_PRODUCTION_KEY_PASSPHRASE": "injected-by-your-secret-store"
-      }
-    }
-  }
-}
-```
-
-### Linux
-
-```json
-{
-  "mcpServers": {
-    "ssh": {
-      "command": "/opt/ssh-mcp/go/dist/ssh-mcp-server-linux-amd64",
-      "args": [
-        "-config",
-        "/opt/ssh-mcp/config/servers.json"
-      ],
+      "command": "C:\\ssh-mcp\\ssh-mcp-server-windows-amd64.exe",
+      "args": ["-config", "C:\\ssh-mcp\\servers.json"],
       "env": {
         "SSH_MCP_STAGING_PASSWORD": "injected-by-your-secret-store"
       }
@@ -187,193 +135,65 @@ Use the appropriate executable as the MCP server command. The exact configuratio
 }
 ```
 
-For Linux ARM64, replace the command with `ssh-mcp-server-linux-arm64`.
+Restart the client and ask it to call `ssh_list_servers`.
 
-## 6. Available MCP tools
+The server speaks MCP over stdio. Logs and audit lines go to stderr, so never redirect stderr into stdout. It shuts down cleanly on SIGINT/SIGTERM or when the client closes stdin, and open tunnels are closed on exit.
 
-All tools that operate on a target accept the configured `serverId`.
+## 6. Tools
 
-### `ssh_list_servers`
+| Tool | Purpose |
+|---|---|
+| `ssh_list_servers` | Ids, capabilities, limits, and allowed command prefixes. Never secrets. |
+| `ssh_exec` | Run a non-interactive command; returns `stdout`, `stderr`, `exitCode`, `exitSignal`, `timedOut`, truncation flags |
+| `sftp_list`, `sftp_stat` | Inspect remote paths |
+| `sftp_read_file` | Read text or base64; page large files with `offset` / `nextOffset` |
+| `sftp_write_file` | Create or replace a file from `content` or `contentBase64` |
+| `sftp_mkdir` | Create a directory (`parents: true` for `mkdir -p`) |
+| `sftp_delete` | Delete a file or an empty directory |
+| `sftp_rename` | Rename or move (`overwrite: true` for atomic replace) |
+| `ssh_tunnel_open` / `_list` / `_close` | Local port forwards from a loopback port on this machine |
 
-Lists configured server IDs, host/port/user metadata, and enabled capabilities. It never returns passwords, private keys, passphrases, or environment-variable values.
-
-Arguments: none.
-
-### `ssh_exec`
-
-Runs a remote command.
-
-```json
-{
-  "serverId": "production",
-  "command": "uname -a",
-  "timeoutMs": 30000,
-  "maxOutputBytes": 65536
-}
-```
-
-The result contains `stdout`, `stderr`, `exitCode`, `exitSignal`, `timedOut`, truncation flags, and `durationMs`. A non-zero remote exit code is returned as command result data; it is not treated as a server crash. If the remote process was killed by a signal rather than exiting normally, `exitCode` is `null` and `exitSignal` names the signal (for example `"KILL"`).
-
-### `sftp_list`
-
-Lists a remote directory.
-
-```json
-{
-  "serverId": "production",
-  "path": "/var/log",
-  "maxEntries": 100
-}
-```
-
-### `sftp_stat`
-
-Reads remote file or directory metadata.
-
-```json
-{
-  "serverId": "production",
-  "path": "/etc/hostname"
-}
-```
-
-### `sftp_read_file`
-
-Reads a bounded remote file. Use `encoding: "utf8"` for text or `encoding: "base64"` for binary data.
-
-```json
-{
-  "serverId": "production",
-  "path": "/etc/hostname",
-  "maxBytes": 4096,
-  "encoding": "utf8"
-}
-```
-
-### `sftp_write_file`
-
-Writes bounded content. Provide exactly one of `content` or `contentBase64`.
-
-```json
-{
-  "serverId": "production",
-  "path": "/tmp/hello.txt",
-  "content": "hello from MCP\n"
-}
-```
-
-### `sftp_mkdir`
-
-Creates a remote directory.
-
-```json
-{
-  "serverId": "production",
-  "path": "/tmp/mcp-example"
-}
-```
-
-### `sftp_delete`
-
-Deletes a remote file, or an empty directory when `directory` is `true`.
-
-```json
-{
-  "serverId": "production",
-  "path": "/tmp/hello.txt",
-  "directory": false
-}
-```
-
-### `ssh_tunnel_open`
-
-Opens a local TCP forward through SSH. The local bind is loopback-only.
-
-```json
-{
-  "serverId": "production",
-  "localHost": "127.0.0.1",
-  "localPort": 0,
-  "remoteHost": "127.0.0.1",
-  "remotePort": 5432
-}
-```
-
-Use `localPort: 0` to select a free local port. Forwarding must be enabled for that target with `allowPortForwarding: true`.
-
-### `ssh_tunnel_list` and `ssh_tunnel_close`
-
-`ssh_tunnel_list` returns active tunnel IDs and local ports. Close a tunnel explicitly:
-
-```json
-{
-  "tunnelId": "tunnel-1"
-}
-```
-
-Tunnels are also closed when the server process exits.
-
-## Security recommendations
-
-- Use separate least-privilege SSH accounts for automation.
-- Keep strict `known_hosts` verification enabled.
-- Use private-key authentication where practical.
-- Keep `allowPortForwarding` false unless forwarding is required.
-- Set `allowedCommandPrefixes` for targets that should run only a limited command set.
-- Add `deniedCommandRegexes` for known destructive commands.
-- Keep `maxOutputBytes` and timeouts appropriate for each target.
-- Protect the configuration, private keys, environment variables, and stderr logs.
-- Treat `ssh_exec`, SFTP writes/deletes, and tunnels as privileged operations; the remote account permissions are the final security boundary.
+Arguments and result shapes for every tool: [skills/ssh-mcp/references/tools.md](../skills/ssh-mcp/references/tools.md). Tool descriptions, per-argument schema descriptions, and MCP annotations (`readOnlyHint`, `destructiveHint`, …) are also published to the client through `tools/list`.
 
 ## Build from source
 
-Go 1.26 or newer is required only to build the server. The build uses the official Go MCP SDK and `CGO_ENABLED=0`.
-
-On Windows, build the complete release matrix:
-
-```powershell
-cd go
-powershell -ExecutionPolicy Bypass -File .\scripts\build-all.ps1
-```
-
-For one target from a Unix environment:
+Go 1.26 or newer is needed only to build.
 
 ```bash
 cd go
-GOOS=linux GOARCH=amd64 ./scripts/build-unix.sh
-GOOS=linux GOARCH=arm64 ./scripts/build-unix.sh
+go test ./...                       # includes end-to-end tests against an in-process SSH server
+go build -ldflags "-X main.version=v1.2.0" ./cmd/ssh-mcp-server
+```
+
+Release builds for every platform, with checksums:
+
+```powershell
+cd go
+powershell -ExecutionPolicy Bypass -File .\scripts\build-all.ps1   # all six targets
+powershell -ExecutionPolicy Bypass -File .\scripts\build-windows.ps1  # this machine only
+```
+
+```bash
+cd go
+./scripts/build-unix.sh                         # this machine
+GOOS=linux GOARCH=arm64 ./scripts/build-unix.sh # cross-compile
 ```
 
 ## Troubleshooting
 
-### `configuration error: knownHostsPath is not a regular file`
-
-The configured `knownHostsPath` does not exist or is not a file. Create/populate it through a trusted SSH administration process and use an absolute path if necessary.
-
-### `password credential is unavailable`
-
-The environment variable named by `passwordEnv` was not present in the MCP server process. Configure it in the MCP client's `env` section or service account environment.
-
-### `private key could not be read` or `private key could not be parsed`
-
-Check the private-key path, file permissions, key format, and passphrase environment variable.
-
-### Host-key verification failure
-
-The remote host key does not match the trusted `known_hosts` entry. Verify the fingerprint out of band before changing the file.
-
-### `permission denied` on Linux
-
-Make the binary executable:
-
-```bash
-chmod +x ./dist/ssh-mcp-server-linux-amd64
-```
-
-### Windows says the executable is not compatible
-
-Use `ssh-mcp-server-windows-amd64.exe` on Intel/AMD 64-bit Windows. The Linux binaries cannot run on Windows.
+| Message | Fix |
+|---|---|
+| `no configuration file found; searched …` | Run `ssh-mcp-server setup`, pass `-config` with an absolute path, or set `SSH_MCP_CONFIG`. |
+| `knownHostsPath is not a regular file` | Create the file with `ssh-keyscan` (after verifying the fingerprint) or fix the path. |
+| `host key for … is not in …` | Add the verified key; non-default ports are recorded as `[host]:port`. |
+| `HOST KEY MISMATCH` | The key changed. Verify out of band before replacing the entry (`ssh-keygen -R host`). |
+| `environment variable X (passwordEnv …) is not set` | Set it in the MCP client's `env` block for this server. |
+| `private key … is encrypted` | Configure `privateKeyPassphraseEnv` and provide the variable. |
+| `unable to authenticate` | Wrong username or password, or the key isn't in `authorized_keys`. |
+| `keyboard-interactive challenge is not a single password prompt` | The server requires MFA; use a key-based service account. |
+| `cannot reach …` / `handshake … timed out` | Network, firewall, or port problem; raise `connectTimeoutMs` on slow links. |
+| `server "x" is busy` | All `maxConcurrentOperations` slots are in use; retry or raise the limit. |
 
 ## License
 
-This project is licensed under the [MIT License](../LICENSE).
+[MIT](../LICENSE)

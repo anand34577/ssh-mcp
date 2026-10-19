@@ -8,13 +8,22 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   go-test:
-    name: Go tests
-    runs-on: ubuntu-latest
+    name: Go tests (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
     defaults:
       run:
         working-directory: go
+        shell: bash
     steps:
       - name: Check out source
         uses: actions/checkout@v6
@@ -26,14 +35,18 @@ jobs:
           cache-dependency-path: go/go.sum
 
       - name: Check formatting
-        shell: bash
-        run: test -z "$(gofmt -l .)"
-
-      - name: Run tests with race detector
-        run: go test -race ./...
+        run: test -z "$(gofmt -l .)" || { gofmt -l .; exit 1; }
 
       - name: Run go vet
         run: go vet ./...
+
+      - name: Run tests
+        run: |
+          if [ "${{ runner.os }}" = "Linux" ]; then
+            go test -race -count=1 ./...
+          else
+            go test -count=1 ./...
+          fi
 
   go-build:
     name: Go ${{ matrix.goos }}/${{ matrix.goarch }}
@@ -42,15 +55,12 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - goos: windows
-            goarch: amd64
-            extension: .exe
-          - goos: linux
-            goarch: amd64
-            extension: ''
-          - goos: linux
-            goarch: arm64
-            extension: ''
+          - { goos: windows, goarch: amd64, extension: .exe }
+          - { goos: windows, goarch: arm64, extension: .exe }
+          - { goos: linux, goarch: amd64, extension: '' }
+          - { goos: linux, goarch: arm64, extension: '' }
+          - { goos: darwin, goarch: amd64, extension: '' }
+          - { goos: darwin, goarch: arm64, extension: '' }
     defaults:
       run:
         working-directory: go
@@ -72,7 +82,7 @@ jobs:
         shell: bash
         run: |
           mkdir -p dist
-          go build -trimpath -ldflags "-s -w" \
+          go build -trimpath -ldflags "-s -w -X main.version=ci-${GITHUB_SHA::7}" \
             -o "dist/ssh-mcp-server-${GOOS}-${GOARCH}${{ matrix.extension }}" \
             ./cmd/ssh-mcp-server
 
@@ -84,8 +94,12 @@ jobs:
           if-no-files-found: error
 
   java-test:
-    name: Java 11 tests
+    name: Java ${{ matrix.java }} tests
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        java: ['11', '21']
     defaults:
       run:
         working-directory: java
@@ -93,12 +107,31 @@ jobs:
       - name: Check out source
         uses: actions/checkout@v6
 
-      - name: Set up JDK 11
+      - name: Set up JDK ${{ matrix.java }}
         uses: actions/setup-java@v5
         with:
           distribution: temurin
-          java-version: '11'
+          java-version: ${{ matrix.java }}
           cache: maven
 
       - name: Run Maven verification and package checks
         run: mvn -B -ntp verify
+
+  installers:
+    name: Installer scripts
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v6
+
+      - name: Check install.sh
+        run: |
+          sh -n install.sh
+          shellcheck install.sh assets/tools/render.sh
+
+      - name: Check install.ps1
+        shell: pwsh
+        run: |
+          $errors = $null
+          [void][System.Management.Automation.Language.Parser]::ParseFile("$PWD/install.ps1", [ref]$null, [ref]$errors)
+          if ($errors) { $errors | ForEach-Object { Write-Error $_.ToString() }; exit 1 }

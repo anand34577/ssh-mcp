@@ -1,0 +1,92 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="880" viewBox="0 0 1600 880" role="img" aria-label="SSH MCP features">
+  <defs>
+    <linearGradient id="brand" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#22D3EE"/>
+      <stop offset="0.55" stop-color="#6366F1"/>
+      <stop offset="1" stop-color="#A855F7"/>
+    </linearGradient>
+    <radialGradient id="glow" cx="0.5" cy="0" r="0.8">
+      <stop offset="0" stop-color="#6366F1" stop-opacity="0.22"/>
+      <stop offset="1" stop-color="#6366F1" stop-opacity="0"/>
+    </radialGradient>
+    <clipPath id="frame"><rect width="1600" height="880" rx="28"/></clipPath>
+    <style>
+      .sans { font-family: Inter, 'Segoe UI', -apple-system, BlinkMacSystemFont, Roboto, Helvetica, Arial, sans-serif; }
+      .card { fill: #111A2E; stroke: #FFFFFF; stroke-opacity: 0.09; }
+      .badge { fill: url(#brand); fill-opacity: 0.16; }
+      .icon { fill: none; stroke: #67E8F9; stroke-width: 3; stroke-linecap: round; stroke-linejoin: round; }
+      .title { font-size: 28px; font-weight: 700; fill: #F1F5F9; }
+      .body { font-size: 20px; fill: #94A3B8; }
+    </style>
+  </defs>
+  <g clip-path="url(#frame)">
+    <rect width="1600" height="880" fill="#0B1220"/>
+    <rect width="1600" height="880" fill="url(#glow)"/>
+
+    <text x="800" y="104" text-anchor="middle" class="sans" font-size="50" font-weight="800" fill="#FFFFFF" letter-spacing="-1">Everything you need. Nothing you don't.</text>
+    <text x="800" y="150" text-anchor="middle" class="sans" font-size="24" fill="#94A3B8">Built for people who just want their AI to help with their servers.</text>
+
+    <g class="sans">
+      <!-- 1 -->
+      <g transform="translate(96 200)">
+        <rect class="card" width="448" height="300" rx="24"/>
+        <circle class="badge" cx="76" cy="76" r="36"/>
+        <path class="icon" transform="translate(52 52)" d="M8 10 H40 A4 4 0 0 1 44 14 V32 A4 4 0 0 1 40 36 H22 L13 43 V36 H8 A4 4 0 0 1 4 32 V14 A4 4 0 0 1 8 10 Z M14 20 H34 M14 27 H27"/>
+        <text class="title" x="40" y="160">Talk to your servers</text>
+        <text class="body" x="40" y="200">Ask in plain words. Your AI runs</text>
+        <text class="body" x="40" y="230">the right commands and explains</text>
+        <text class="body" x="40" y="260">what it found.</text>
+      </g>
+      <!-- 2 -->
+      <g transform="translate(576 200)">
+        <rect class="card" width="448" height="300" rx="24"/>
+        <circle class="badge" cx="76" cy="76" r="36"/>
+        <path class="icon" transform="translate(52 52)" d="M24 24 A8 8 0 1 1 24 23.9 M24 24 H44 M36 24 V32 M42 24 V30" />
+        <text class="title" x="40" y="160">Your keys stay with you</text>
+        <text class="body" x="40" y="200">Passwords and keys stay on your</text>
+        <text class="body" x="40" y="230">computer. The AI never sees</text>
+        <text class="body" x="40" y="260">them, not even once.</text>
+      </g>
+      <!-- 3 -->
+      <g transform="translate(1056 200)">
+        <rect class="card" width="448" height="300" rx="24"/>
+        <circle class="badge" cx="76" cy="76" r="36"/>
+        <path class="icon" transform="translate(52 52)" d="M27 4 L11 27 H24 L21 44 L37 20 H24 Z"/>
+        <text class="title" x="40" y="160">One-click setup</text>
+        <text class="body" x="40" y="200">A friendly helper adds your</text>
+        <text class="body" x="40" y="230">servers and connects your AI</text>
+        <text class="body" x="40" y="260">apps for you. No config files.</text>
+      </g>
+      <!-- 4 -->
+      <g transform="translate(96 532)">
+        <rect class="card" width="448" height="300" rx="24"/>
+        <circle class="badge" cx="76" cy="76" r="36"/>
+        <path class="icon" transform="translate(52 52)" d="M4 24 C10 13 17 9 24 9 C31 9 38 13 44 24 C38 35 31 39 24 39 C17 39 10 35 4 24 Z M24 18 A6 6 0 1 1 23.9 18"/>
+        <text class="title" x="40" y="160">Look-only mode</text>
+        <text class="body" x="40" y="200">Let your AI check status and</text>
+        <text class="body" x="40" y="230">read logs without changing</text>
+        <text class="body" x="40" y="260">anything on the server.</text>
+      </g>
+      <!-- 5 -->
+      <g transform="translate(576 532)">
+        <rect class="card" width="448" height="300" rx="24"/>
+        <circle class="badge" cx="76" cy="76" r="36"/>
+        <path class="icon" transform="translate(52 52)" d="M4 14 A4 4 0 0 1 8 10 H18 L22 15 H40 A4 4 0 0 1 44 19 V36 A4 4 0 0 1 40 40 H8 A4 4 0 0 1 4 36 Z"/>
+        <text class="title" x="40" y="160">Files made easy</text>
+        <text class="body" x="40" y="200">Read, upload, rename, and tidy</text>
+        <text class="body" x="40" y="230">up files on any server, even</text>
+        <text class="body" x="40" y="260">big ones, piece by piece.</text>
+      </g>
+      <!-- 6 -->
+      <g transform="translate(1056 532)">
+        <rect class="card" width="448" height="300" rx="24"/>
+        <circle class="badge" cx="76" cy="76" r="36"/>
+        <path class="icon" transform="translate(52 52)" d="M8 8 H40 A4 4 0 0 1 44 12 V30 A4 4 0 0 1 40 34 H8 A4 4 0 0 1 4 30 V12 A4 4 0 0 1 8 8 Z M18 42 H30 M24 34 V42"/>
+        <text class="title" x="40" y="160">Runs anywhere</text>
+        <text class="body" x="40" y="200">Windows, macOS, and Linux.</text>
+        <text class="body" x="40" y="230">One small program. Nothing</text>
+        <text class="body" x="40" y="260">else to install.</text>
+      </g>
+    </g>
+  </g>
+</svg>

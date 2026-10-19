@@ -6,19 +6,31 @@
 
     <groupId>com.example</groupId>
     <artifactId>ssh-mcp-server</artifactId>
-    <version>1.0.0</version>
+    <version>1.2.0</version>
     <name>SSH MCP Server</name>
     <description>Secure, multi-server SSH and SFTP MCP server for Java 11+</description>
 
     <properties>
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
         <maven.compiler.release>11</maven.compiler.release>
-        <jackson.version>2.17.3</jackson.version>
-        <sshd.version>2.13.2</sshd.version>
-        <bouncycastle.version>1.78.1</bouncycastle.version>
-        <slf4j.version>1.7.36</slf4j.version>
-        <junit.version>5.10.3</junit.version>
+        <jackson.version>2.22.4</jackson.version>
+        <sshd.version>2.20.0</sshd.version>
+        <bouncycastle.version>1.86</bouncycastle.version>
+        <slf4j.version>2.0.20</slf4j.version>
+        <!-- JUnit 6 requires Java 17; stay on 5.x to keep the Java 11 baseline. -->
+        <junit.version>5.14.4</junit.version>
     </properties>
+
+    <dependencyManagement>
+        <dependencies>
+            <!-- sshd brings jcl-over-slf4j 1.7.x; keep the whole SLF4J family aligned. -->
+            <dependency>
+                <groupId>org.slf4j</groupId>
+                <artifactId>jcl-over-slf4j</artifactId>
+                <version>${slf4j.version}</version>
+            </dependency>
+        </dependencies>
+    </dependencyManagement>
 
     <dependencies>
         <dependency>
@@ -66,7 +78,7 @@
             <plugin>
                 <groupId>org.apache.maven.plugins</groupId>
                 <artifactId>maven-compiler-plugin</artifactId>
-                <version>3.13.0</version>
+                <version>3.16.0</version>
                 <configuration>
                     <release>${maven.compiler.release}</release>
                 </configuration>
@@ -74,12 +86,18 @@
             <plugin>
                 <groupId>org.apache.maven.plugins</groupId>
                 <artifactId>maven-surefire-plugin</artifactId>
-                <version>3.2.5</version>
+                <version>3.6.0</version>
+                <configuration>
+                    <!-- Integration tests authenticate with this; Java cannot set env vars at runtime. -->
+                    <environmentVariables>
+                        <SSH_MCP_TEST_PASSWORD>correct horse</SSH_MCP_TEST_PASSWORD>
+                    </environmentVariables>
+                </configuration>
             </plugin>
             <plugin>
                 <groupId>org.apache.maven.plugins</groupId>
                 <artifactId>maven-shade-plugin</artifactId>
-                <version>3.5.3</version>
+                <version>3.6.2</version>
                 <executions>
                     <execution>
                         <phase>package</phase>
@@ -106,6 +124,10 @@
                             <transformers>
                                 <transformer implementation="org.apache.maven.plugins.shade.resource.ManifestResourceTransformer">
                                     <mainClass>com.example.sshmcp.Main</mainClass>
+                                    <manifestEntries>
+                                        <Implementation-Title>${project.name}</Implementation-Title>
+                                        <Implementation-Version>${project.version}</Implementation-Version>
+                                    </manifestEntries>
                                 </transformer>
                                 <transformer implementation="org.apache.maven.plugins.shade.resource.ServicesResourceTransformer"/>
                             </transformers>
