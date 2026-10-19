@@ -1,0 +1,18 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512" role="img" aria-label="SSH MCP logo">
+  <defs>
+    <linearGradient id="brand" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#22D3EE"/>
+      <stop offset="0.55" stop-color="#6366F1"/>
+      <stop offset="1" stop-color="#A855F7"/>
+    </linearGradient>
+    <linearGradient id="shine" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#FFFFFF" stop-opacity="0.24"/>
+      <stop offset="0.5" stop-color="#FFFFFF" stop-opacity="0"/>
+    </linearGradient>
+  </defs>
+  <rect x="16" y="16" width="480" height="480" rx="112" fill="url(#brand)"/>
+  <rect x="16" y="16" width="480" height="480" rx="112" fill="url(#shine)"/>
+  <path d="M136 184 L228 260 L136 336" fill="none" stroke="#FFFFFF" stroke-width="44" stroke-linecap="round" stroke-linejoin="round"/>
+  <rect x="262" y="316" width="118" height="42" rx="21" fill="#FFFFFF"/>
+  <path d="M372 104 C378 142 390 154 428 160 C390 166 378 178 372 216 C366 178 354 166 316 160 C354 154 366 142 372 104 Z" fill="#FFFFFF"/>
+</svg>

@@ -18,3 +18,7 @@ Never send passwords, private keys, production hostnames, or private `known_host
 - Keep port forwarding disabled unless required.
 - Review command policies, output limits, and timeout limits per target.
 - Protect stderr audit logs and configuration files.
+
+## Privacy
+
+SSH MCP has no telemetry or analytics and makes no network connections other than to your configured SSH servers, and to the release download location when you explicitly run an installer or `ssh-mcp-server update`. Downloads are verified against published SHA-256 checksums before anything is installed or replaced. See [PRIVACY.md](PRIVACY.md).

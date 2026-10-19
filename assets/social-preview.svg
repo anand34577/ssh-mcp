@@ -1,0 +1,55 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="640" viewBox="0 0 1280 640" role="img" aria-label="SSH MCP: let your AI assistant work on your servers, safely">
+  <defs>
+    <linearGradient id="brand" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#22D3EE"/>
+      <stop offset="0.55" stop-color="#6366F1"/>
+      <stop offset="1" stop-color="#A855F7"/>
+    </linearGradient>
+    <linearGradient id="text" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#67E8F9"/>
+      <stop offset="1" stop-color="#C4B5FD"/>
+    </linearGradient>
+    <radialGradient id="glowA" cx="0.1" cy="0.05" r="0.7">
+      <stop offset="0" stop-color="#22D3EE" stop-opacity="0.30"/>
+      <stop offset="1" stop-color="#22D3EE" stop-opacity="0"/>
+    </radialGradient>
+    <radialGradient id="glowB" cx="0.95" cy="1" r="0.7">
+      <stop offset="0" stop-color="#A855F7" stop-opacity="0.32"/>
+      <stop offset="1" stop-color="#A855F7" stop-opacity="0"/>
+    </radialGradient>
+    <pattern id="grid" width="40" height="40" patternUnits="userSpaceOnUse">
+      <path d="M40 0 H0 V40" fill="none" stroke="#FFFFFF" stroke-opacity="0.045" stroke-width="1"/>
+    </pattern>
+    <style>
+      .sans { font-family: Inter, 'Segoe UI', -apple-system, BlinkMacSystemFont, Roboto, Helvetica, Arial, sans-serif; }
+    </style>
+  </defs>
+  <rect width="1280" height="640" fill="#0B1220"/>
+  <rect width="1280" height="640" fill="url(#grid)"/>
+  <rect width="1280" height="640" fill="url(#glowA)"/>
+  <rect width="1280" height="640" fill="url(#glowB)"/>
+
+  <g transform="translate(560 72) scale(0.3125)">
+    <rect x="16" y="16" width="480" height="480" rx="112" fill="url(#brand)"/>
+    <path d="M136 184 L228 260 L136 336" fill="none" stroke="#FFFFFF" stroke-width="44" stroke-linecap="round" stroke-linejoin="round"/>
+    <rect x="262" y="316" width="118" height="42" rx="21" fill="#FFFFFF"/>
+    <path d="M372 104 C378 142 390 154 428 160 C390 166 378 178 372 216 C366 178 354 166 316 160 C354 154 366 142 372 104 Z" fill="#FFFFFF"/>
+  </g>
+
+  <text x="640" y="320" text-anchor="middle" class="sans" font-size="92" font-weight="800" fill="#FFFFFF" letter-spacing="-1.5">SSH MCP</text>
+  <text x="640" y="388" text-anchor="middle" class="sans" font-size="40" font-weight="700" fill="#E6EDF7">Let your AI work on your servers. <tspan fill="url(#text)">Safely.</tspan></text>
+  <text x="640" y="436" text-anchor="middle" class="sans" font-size="24" fill="#94A3B8">For Claude, Cursor, VS Code and more. Your passwords never leave your computer.</text>
+
+  <g class="sans" font-size="21" font-weight="600" fill="#E6EDF7">
+    <rect x="218" y="482" width="200" height="48" rx="24" fill="#FFFFFF" fill-opacity="0.07" stroke="#FFFFFF" stroke-opacity="0.14"/>
+    <text x="318" y="513" text-anchor="middle">One-click setup</text>
+    <rect x="434" y="482" width="284" height="48" rx="24" fill="#FFFFFF" fill-opacity="0.07" stroke="#FFFFFF" stroke-opacity="0.14"/>
+    <text x="576" y="513" text-anchor="middle">Windows · macOS · Linux</text>
+    <rect x="734" y="482" width="150" height="48" rx="24" fill="#FFFFFF" fill-opacity="0.07" stroke="#FFFFFF" stroke-opacity="0.14"/>
+    <text x="809" y="513" text-anchor="middle">Look-only</text>
+    <rect x="900" y="482" width="162" height="48" rx="24" fill="#FFFFFF" fill-opacity="0.07" stroke="#FFFFFF" stroke-opacity="0.14"/>
+    <text x="981" y="513" text-anchor="middle">Open source</text>
+  </g>
+
+  <text x="640" y="596" text-anchor="middle" class="sans" font-size="20" fill="#64748B">github.com/anand34577/ssh-mcp</text>
+</svg>

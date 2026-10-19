@@ -1,46 +1,90 @@
-name: Release binaries
+name: Release
+
+# Publishes a GitHub release with ready-to-run programs for every platform.
+#
+# Two ways to release:
+#   1. Push a tag:       git tag v1.2.0 && git push origin v1.2.0
+#   2. One click:        Actions > Release > Run workflow, and type the version (v1.2.0)
+# Either way, java/pom.xml must already contain the same version.
 
 on:
   push:
     tags:
       - 'v*'
   workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version to release, for example v1.2.0 (leave empty for a test build without a release)'
+        required: false
+        type: string
 
 concurrency:
-  group: release-${{ github.ref }}
+  group: release-${{ github.ref }}-${{ inputs.version }}
   cancel-in-progress: false
 
+permissions:
+  contents: read
+
 jobs:
+  prepare:
+    name: Check version
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.version.outputs.tag }}
+      number: ${{ steps.version.outputs.number }}
+      label: ${{ steps.version.outputs.label }}
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v6
+
+      - name: Work out the version
+        id: version
+        shell: bash
+        env:
+          INPUT_VERSION: ${{ inputs.version }}
+        run: |
+          tag="${INPUT_VERSION:-}"
+          if [ -z "$tag" ] && [ "${GITHUB_REF_TYPE}" = "tag" ]; then
+            tag="${GITHUB_REF_NAME}"
+          fi
+          if [ -n "$tag" ]; then
+            if ! printf '%s' "$tag" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+$'; then
+              echo "::error::Version must look like v1.2.3 (got '$tag')."
+              exit 1
+            fi
+            pom=$(sed -n 's:^    <version>\(.*\)</version>$:\1:p' java/pom.xml | head -n 1)
+            if [ "v${pom}" != "$tag" ]; then
+              echo "::error::java/pom.xml says ${pom}, but the release is ${tag}. Update the pom version first."
+              exit 1
+            fi
+            echo "tag=$tag" >> "$GITHUB_OUTPUT"
+            echo "number=${tag#v}" >> "$GITHUB_OUTPUT"
+            echo "label=$tag" >> "$GITHUB_OUTPUT"
+          else
+            echo "number=0.0.0" >> "$GITHUB_OUTPUT"
+            echo "label=dev-${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
+          fi
+
   go-build:
     name: Go ${{ matrix.goos }}/${{ matrix.goarch }}
+    needs: prepare
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
         include:
-          - goos: windows
-            goarch: amd64
-            extension: .exe
-          - goos: windows
-            goarch: arm64
-            extension: .exe
-          - goos: linux
-            goarch: amd64
-            extension: ''
-          - goos: linux
-            goarch: arm64
-            extension: ''
-          - goos: darwin
-            goarch: amd64
-            extension: ''
-          - goos: darwin
-            goarch: arm64
-            extension: ''
-    permissions:
-      contents: read
+          - { goos: windows, goarch: amd64, extension: .exe }
+          - { goos: windows, goarch: arm64, extension: .exe }
+          - { goos: linux, goarch: amd64, extension: '' }
+          - { goos: linux, goarch: arm64, extension: '' }
+          - { goos: darwin, goarch: amd64, extension: '' }
+          - { goos: darwin, goarch: arm64, extension: '' }
     defaults:
       run:
         working-directory: go
+        shell: bash
+    env:
+      ASSET: ssh-mcp-server-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.extension }}
     steps:
       - name: Check out source
         uses: actions/checkout@v6
@@ -54,34 +98,41 @@ jobs:
       - name: Run tests
         run: go test ./...
 
-      - name: Build binary
-        shell: bash
+      - name: Add the Windows icon and version details
+        if: matrix.goos == 'windows'
+        run: |
+          go run github.com/tc-hib/go-winres@v0.3.3 simply \
+            --arch "${{ matrix.goarch }}" --out cmd/ssh-mcp-server/rsrc --manifest cli \
+            --icon ../assets/icon-256.png --product-name "SSH MCP" \
+            --file-description "SSH MCP: lets AI assistants work on your servers over SSH" \
+            --product-version "${{ needs.prepare.outputs.number }}" --file-version "${{ needs.prepare.outputs.number }}" \
+            --copyright "MIT License" --original-filename ssh-mcp-server.exe
+
+      - name: Build
         env:
           GOOS: ${{ matrix.goos }}
           GOARCH: ${{ matrix.goarch }}
           CGO_ENABLED: '0'
         run: |
           mkdir -p dist
-          go build -trimpath -ldflags "-s -w" \
-            -o "dist/ssh-mcp-server-${GOOS}-${GOARCH}${{ matrix.extension }}" \
-            ./cmd/ssh-mcp-server
-          sha256sum "dist/ssh-mcp-server-${GOOS}-${GOARCH}${{ matrix.extension }}" \
-            > "dist/ssh-mcp-server-${GOOS}-${GOARCH}${{ matrix.extension }}.sha256"
+          go build -trimpath -ldflags "-s -w -X main.version=${{ needs.prepare.outputs.label }}" \
+            -o "dist/${ASSET}" ./cmd/ssh-mcp-server
+          # Checksum files list the bare file name so `sha256sum -c` works on downloads.
+          cd dist && sha256sum "${ASSET}" > "${ASSET}.sha256"
 
-      - name: Upload release artifact
+      - name: Upload
         uses: actions/upload-artifact@v4
         with:
           name: ssh-mcp-server-go-${{ matrix.goos }}-${{ matrix.goarch }}
           path: |
-            go/dist/ssh-mcp-server-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.extension }}
-            go/dist/ssh-mcp-server-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.extension }}.sha256
+            go/dist/${{ env.ASSET }}
+            go/dist/${{ env.ASSET }}.sha256
           if-no-files-found: error
 
   java-jar:
-    name: Java portable jar
+    name: Java jar
+    needs: prepare
     runs-on: ubuntu-latest
-    permissions:
-      contents: read
     defaults:
       run:
         working-directory: java
@@ -96,47 +147,35 @@ jobs:
           java-version: '11'
           cache: maven
 
-      - name: Build shaded jar
-        run: mvn -B -ntp -DskipTests clean package
+      - name: Build and test
+        run: mvn -B -ntp clean verify
 
       - name: Stage jar
         shell: bash
         run: |
           mkdir -p dist-release
           cp target/ssh-mcp-server.jar dist-release/ssh-mcp-server.jar
-          cd dist-release
-          sha256sum ssh-mcp-server.jar > ssh-mcp-server.jar.sha256
+          cd dist-release && sha256sum ssh-mcp-server.jar > ssh-mcp-server.jar.sha256
 
-      - name: Upload release artifact
+      - name: Upload
         uses: actions/upload-artifact@v4
         with:
           name: ssh-mcp-server-java-jar
-          path: |
-            java/dist-release/ssh-mcp-server.jar
-            java/dist-release/ssh-mcp-server.jar.sha256
+          path: java/dist-release/*
           if-no-files-found: error
 
   java-runtime:
-    name: Java runtime ${{ matrix.os }}
+    name: Java with runtime (${{ matrix.platform }})
+    needs: prepare
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
         include:
-          - os: ubuntu-latest
-            platform: linux-x64
-            script: scripts/package-unix.sh
-            archive: tar
-          - os: macos-latest
-            platform: macos-arm64
-            script: scripts/package-unix.sh
-            archive: tar
-          - os: windows-latest
-            platform: windows-x64
-            script: scripts/package-windows.ps1
-            archive: zip
-    permissions:
-      contents: read
+          - { os: ubuntu-latest, platform: linux-x64, archive: tar }
+          - { os: ubuntu-24.04-arm, platform: linux-arm64, archive: tar }
+          - { os: macos-latest, platform: macos-arm64, archive: tar }
+          - { os: windows-latest, platform: windows-x64, archive: zip }
     defaults:
       run:
         working-directory: java
@@ -151,37 +190,39 @@ jobs:
           java-version: '11'
           cache: maven
 
-      - name: Build portable runtime (Unix)
+      - name: Build (macOS and Linux)
         if: matrix.archive == 'tar'
         shell: bash
         run: |
-          chmod +x ${{ matrix.script }}
-          ./${{ matrix.script }}
+          chmod +x scripts/package-unix.sh
+          ./scripts/package-unix.sh
 
-      - name: Build portable runtime (Windows)
+      - name: Build (Windows)
         if: matrix.archive == 'zip'
         shell: pwsh
-        run: ./${{ matrix.script }}
+        run: ./scripts/package-windows.ps1
 
-      - name: Archive runtime (tar)
+      - name: Archive (tar)
         if: matrix.archive == 'tar'
         shell: bash
         run: |
           mkdir -p dist-release
-          tar -C dist -czf "dist-release/ssh-mcp-server-${{ matrix.platform }}.tar.gz" .
-          sha256sum "dist-release/ssh-mcp-server-${{ matrix.platform }}.tar.gz" \
-            > "dist-release/ssh-mcp-server-${{ matrix.platform }}.tar.gz.sha256"
+          name="ssh-mcp-server-${{ matrix.platform }}.tar.gz"
+          tar -C dist -czf "dist-release/${name}" .
+          # shasum exists on both Linux and macOS runners; sha256sum is not on macOS.
+          cd dist-release && shasum -a 256 "${name}" > "${name}.sha256"
 
-      - name: Archive runtime (zip)
+      - name: Archive (zip)
         if: matrix.archive == 'zip'
         shell: pwsh
         run: |
+          $name = "ssh-mcp-server-${{ matrix.platform }}.zip"
           New-Item -ItemType Directory -Force -Path dist-release | Out-Null
-          Compress-Archive -Path dist\* -DestinationPath "dist-release/ssh-mcp-server-${{ matrix.platform }}.zip"
-          $hash = Get-FileHash "dist-release/ssh-mcp-server-${{ matrix.platform }}.zip" -Algorithm SHA256
-          "$($hash.Hash.ToLower())  ssh-mcp-server-${{ matrix.platform }}.zip" | Set-Content "dist-release/ssh-mcp-server-${{ matrix.platform }}.zip.sha256"
+          Compress-Archive -Path dist\* -DestinationPath "dist-release/$name"
+          $hash = (Get-FileHash "dist-release/$name" -Algorithm SHA256).Hash.ToLower()
+          "$hash  $name" | Set-Content -NoNewline "dist-release/$name.sha256"
 
-      - name: Upload release artifact
+      - name: Upload
         uses: actions/upload-artifact@v4
         with:
           name: ssh-mcp-server-java-${{ matrix.platform }}
@@ -189,25 +230,42 @@ jobs:
           if-no-files-found: error
 
   publish:
-    name: Publish GitHub release
-    if: startsWith(github.ref, 'refs/tags/v')
-    needs: [go-build, java-jar, java-runtime]
+    name: Publish release
+    if: needs.prepare.outputs.tag != ''
+    needs: [prepare, go-build, java-jar, java-runtime]
     runs-on: ubuntu-latest
     permissions:
       contents: write
+    env:
+      TAG: ${{ needs.prepare.outputs.tag }}
+      GH_TOKEN: ${{ github.token }}
     steps:
-      - name: Download release artifacts
+      - name: Check out source
+        uses: actions/checkout@v6
+
+      - name: Download build outputs
         uses: actions/download-artifact@v4
         with:
           pattern: ssh-mcp-server-*
           merge-multiple: true
           path: release
 
-      - name: Publish release
-        env:
-          GH_TOKEN: ${{ github.token }}
+      - name: Add installers and the combined checksum list
         run: |
-          gh release create "${GITHUB_REF_NAME}" release/* \
-            --repo "${GITHUB_REPOSITORY}" \
-            --title "SSH MCP Server ${GITHUB_REF_NAME}" \
-            --generate-notes
+          cp install.sh install.ps1 release/
+          cd release
+          sha256sum $(ls | grep -v '\.sha256$' | sort) > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+
+      - name: Publish
+        run: |
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "Release $TAG exists; replacing its files."
+            gh release upload "$TAG" release/* --clobber
+          else
+            gh release create "$TAG" release/* \
+              --target "$GITHUB_SHA" \
+              --title "SSH MCP $TAG" \
+              --notes-file .github/release-notes.md \
+              --generate-notes
+          fi

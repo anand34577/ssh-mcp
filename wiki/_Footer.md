@@ -1,0 +1,1 @@
+SSH MCP is free and open source ([MIT](https://github.com/anand34577/ssh-mcp/blob/main/LICENSE)). No analytics, no telemetry. · [Download](https://github.com/anand34577/ssh-mcp/releases/latest) · [Report a problem](https://github.com/anand34577/ssh-mcp/issues) · Found a mistake on this page? Edit it in the [`wiki/` folder](https://github.com/anand34577/ssh-mcp/tree/main/wiki).

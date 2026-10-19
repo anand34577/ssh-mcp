@@ -1,0 +1,48 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1400" height="1122" viewBox="0 0 1400 1122" role="img" aria-label="The SSH MCP setup wizard adding a server in a terminal">
+  <defs>
+    <radialGradient id="glow" cx="0.85" cy="0" r="0.9">
+      <stop offset="0" stop-color="#6366F1" stop-opacity="0.18"/>
+      <stop offset="1" stop-color="#6366F1" stop-opacity="0"/>
+    </radialGradient>
+    <style>
+      .mono { font-family: 'JetBrains Mono', 'Cascadia Code', Consolas, 'SF Mono', Menlo, monospace; font-size: 19px; white-space: pre; }
+      .sans { font-family: Inter, 'Segoe UI', -apple-system, BlinkMacSystemFont, Roboto, Helvetica, Arial, sans-serif; }
+    </style>
+  </defs>
+  <rect width="1400" height="1122" rx="22" fill="#0D1526"/>
+  <rect width="1400" height="1122" rx="22" fill="url(#glow)"/>
+  <rect x="0.5" y="0.5" width="1399" height="1121" rx="22" fill="none" stroke="#FFFFFF" stroke-opacity="0.10"/>
+  <path d="M0 22 A22 22 0 0 1 22 0 H1378 A22 22 0 0 1 1400 22 V60 H0 Z" fill="#FFFFFF" fill-opacity="0.04"/>
+  <circle cx="34" cy="30" r="8" fill="#F87171"/>
+  <circle cx="60" cy="30" r="8" fill="#FBBF24"/>
+  <circle cx="86" cy="30" r="8" fill="#34D399"/>
+  <text x="700" y="37" text-anchor="middle" class="sans" font-size="18" font-weight="600" fill="#94A3B8">Terminal: ssh-mcp-server setup</text>
+  <g class="mono" xml:space="preserve">
+    <text x="56" y="112" fill="#64748B">$ ssh-mcp-server setup</text>
+    <text x="56" y="170" fill="#FFFFFF" font-weight="700">SSH MCP setup</text>
+    <text x="56" y="199" fill="#CBD5E1">This connects your AI assistant (Claude, Cursor, VS Code, and others) to your</text>
+    <text x="56" y="228" fill="#CBD5E1">servers over SSH. Your passwords and keys stay on this computer.</text>
+    <text x="56" y="286" fill="#CBD5E1">Let's add your first server.</text>
+    <text x="56" y="344" fill="#CBD5E1">Server address (for example me@example.com or 203.0.113.10): <tspan fill="#67E8F9" font-weight="700">deploy@web.example.com</tspan></text>
+    <text x="56" y="373" fill="#CBD5E1">SSH port [22]: <tspan fill="#475569" font-weight="700">↵</tspan></text>
+    <text x="56" y="402" fill="#CBD5E1">A short name your AI will use for it [web]: <tspan fill="#475569" font-weight="700">↵</tspan></text>
+    <text x="56" y="460" fill="#CBD5E1">How do you sign in to this server?</text>
+    <text x="56" y="489" fill="#CBD5E1">  1) With my key file /home/you/.ssh/id_ed25519 (recommended)</text>
+    <text x="56" y="518" fill="#CBD5E1">  2) With a password</text>
+    <text x="56" y="547" fill="#CBD5E1">  3) With a different key file</text>
+    <text x="56" y="576" fill="#CBD5E1">Choose [1]: <tspan fill="#67E8F9" font-weight="700">1</tspan></text>
+    <text x="56" y="634" fill="#CBD5E1">What should your AI be allowed to do on this server?</text>
+    <text x="56" y="663" fill="#CBD5E1">  1) Anything my account can do</text>
+    <text x="56" y="692" fill="#CBD5E1">  2) Look only: check status and read logs, no changes</text>
+    <text x="56" y="721" fill="#CBD5E1">Choose [1]: <tspan fill="#67E8F9" font-weight="700">2</tspan></text>
+    <text x="56" y="779" fill="#CBD5E1">  The server's fingerprint is:</text>
+    <text x="56" y="808" fill="#FBBF24">    ED25519  SHA256:Oqx37yay52SWroGnz6dYWAE40eSJoHPAtf94BpHZA6g</text>
+    <text x="56" y="837" fill="#CBD5E1">Trust this server? [y/N]: <tspan fill="#67E8F9" font-weight="700">y</tspan></text>
+    <text x="56" y="866" fill="#34D399">  [ok] Signed in to web.</text>
+    <text x="56" y="895" fill="#34D399">  [ok] Saved "web".</text>
+    <text x="56" y="953" fill="#CBD5E1">Connect to Claude Desktop? [Y/n]: <tspan fill="#67E8F9" font-weight="700">y</tspan></text>
+    <text x="56" y="982" fill="#34D399">  [ok] Connected to Claude Desktop.</text>
+    <text x="56" y="1040" fill="#FFFFFF" font-weight="700">All set! Restart your AI app, then try asking it:</text>
+    <text x="56" y="1069" fill="#C4B5FD">  "How much disk space is left on web?"</text>
+  </g>
+</svg>

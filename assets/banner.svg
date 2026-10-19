@@ -1,0 +1,88 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="520" viewBox="0 0 1600 520" role="img" aria-label="SSH MCP: let your AI assistant work on your servers, safely">
+  <defs>
+    <linearGradient id="brand" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#22D3EE"/>
+      <stop offset="0.55" stop-color="#6366F1"/>
+      <stop offset="1" stop-color="#A855F7"/>
+    </linearGradient>
+    <linearGradient id="text" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#67E8F9"/>
+      <stop offset="1" stop-color="#C4B5FD"/>
+    </linearGradient>
+    <radialGradient id="glowA" cx="0.15" cy="0.1" r="0.6">
+      <stop offset="0" stop-color="#22D3EE" stop-opacity="0.28"/>
+      <stop offset="1" stop-color="#22D3EE" stop-opacity="0"/>
+    </radialGradient>
+    <radialGradient id="glowB" cx="0.9" cy="0.95" r="0.6">
+      <stop offset="0" stop-color="#A855F7" stop-opacity="0.30"/>
+      <stop offset="1" stop-color="#A855F7" stop-opacity="0"/>
+    </radialGradient>
+    <pattern id="grid" width="40" height="40" patternUnits="userSpaceOnUse">
+      <path d="M40 0 H0 V40" fill="none" stroke="#FFFFFF" stroke-opacity="0.045" stroke-width="1"/>
+    </pattern>
+    <clipPath id="frame"><rect width="1600" height="520" rx="28"/></clipPath>
+    <style>
+      .sans { font-family: Inter, 'Segoe UI', -apple-system, BlinkMacSystemFont, Roboto, Helvetica, Arial, sans-serif; }
+      .mono { font-family: 'JetBrains Mono', 'Cascadia Code', Consolas, 'SF Mono', Menlo, monospace; }
+    </style>
+  </defs>
+  <g clip-path="url(#frame)">
+    <rect width="1600" height="520" fill="#0B1220"/>
+    <rect width="1600" height="520" fill="url(#grid)"/>
+    <rect width="1600" height="520" fill="url(#glowA)"/>
+    <rect width="1600" height="520" fill="url(#glowB)"/>
+
+    <!-- Logo -->
+    <g transform="translate(96 92) scale(0.21875)">
+      <rect x="16" y="16" width="480" height="480" rx="112" fill="url(#brand)"/>
+      <path d="M136 184 L228 260 L136 336" fill="none" stroke="#FFFFFF" stroke-width="44" stroke-linecap="round" stroke-linejoin="round"/>
+      <rect x="262" y="316" width="118" height="42" rx="21" fill="#FFFFFF"/>
+      <path d="M372 104 C378 142 390 154 428 160 C390 166 378 178 372 216 C366 178 354 166 316 160 C354 154 366 142 372 104 Z" fill="#FFFFFF"/>
+    </g>
+    <text x="228" y="164" class="sans" font-size="74" font-weight="800" fill="#FFFFFF" letter-spacing="-1">SSH MCP</text>
+
+    <text x="96" y="262" class="sans" font-size="40" font-weight="700" fill="#E6EDF7">Let your AI assistant work on</text>
+    <text x="96" y="314" class="sans" font-size="40" font-weight="700" fill="url(#text)">your servers. Safely.</text>
+    <text x="96" y="364" class="sans" font-size="22" fill="#94A3B8">Claude, Cursor, VS Code and more can check, fix, and manage your</text>
+    <text x="96" y="394" class="sans" font-size="22" fill="#94A3B8">servers over SSH. Your passwords and keys never leave your computer.</text>
+
+    <!-- Pills -->
+    <g class="sans" font-size="19" font-weight="600" fill="#E6EDF7">
+      <rect x="96" y="428" width="186" height="44" rx="22" fill="#FFFFFF" fill-opacity="0.07" stroke="#FFFFFF" stroke-opacity="0.14"/>
+      <text x="189" y="456" text-anchor="middle">One-click setup</text>
+      <rect x="296" y="428" width="262" height="44" rx="22" fill="#FFFFFF" fill-opacity="0.07" stroke="#FFFFFF" stroke-opacity="0.14"/>
+      <text x="427" y="456" text-anchor="middle">Windows · macOS · Linux</text>
+      <rect x="572" y="428" width="214" height="44" rx="22" fill="#FFFFFF" fill-opacity="0.07" stroke="#FFFFFF" stroke-opacity="0.14"/>
+      <text x="679" y="456" text-anchor="middle">Free and open source</text>
+    </g>
+
+    <!-- Chat card -->
+    <g transform="translate(900 64)">
+      <rect width="604" height="392" rx="24" fill="#111A2E" stroke="#FFFFFF" stroke-opacity="0.10"/>
+      <circle cx="32" cy="30" r="7" fill="#F87171"/>
+      <circle cx="56" cy="30" r="7" fill="#FBBF24"/>
+      <circle cx="80" cy="30" r="7" fill="#34D399"/>
+      <line x1="0" y1="58" x2="604" y2="58" stroke="#FFFFFF" stroke-opacity="0.08"/>
+
+      <rect x="196" y="80" width="384" height="52" rx="18" fill="url(#brand)"/>
+      <text x="218" y="113" class="sans" font-size="20" font-weight="600" fill="#FFFFFF">Why is my website slow today?</text>
+
+      <rect x="24" y="152" width="556" height="216" rx="18" fill="#FFFFFF" fill-opacity="0.05"/>
+      <text x="46" y="186" class="sans" font-size="19" font-weight="600" fill="#E6EDF7">I checked your server "web":</text>
+      <g class="mono" font-size="16">
+        <rect x="46" y="202" width="232" height="30" rx="8" fill="#22D3EE" fill-opacity="0.12"/>
+        <text x="58" y="222" fill="#67E8F9">ran  top -b -n 1</text>
+        <rect x="290" y="202" width="232" height="30" rx="8" fill="#A855F7" fill-opacity="0.14"/>
+        <text x="302" y="222" fill="#D8B4FE">read  error.log</text>
+      </g>
+      <g class="sans" font-size="18" fill="#CBD5E1">
+        <circle cx="54" cy="262" r="5" fill="#F87171"/>
+        <text x="70" y="268">CPU is at 94%: six PHP workers are stuck</text>
+        <circle cx="54" cy="296" r="5" fill="#34D399"/>
+        <text x="70" y="302">Disk space is fine (41% used)</text>
+        <circle cx="54" cy="330" r="5" fill="#FBBF24"/>
+        <text x="70" y="336">Want me to restart PHP? I'll wait for your OK.</text>
+      </g>
+    </g>
+  </g>
+</svg>
