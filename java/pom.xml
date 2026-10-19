@@ -6,7 +6,7 @@
 
     <groupId>com.example</groupId>
     <artifactId>ssh-mcp-server</artifactId>
-    <version>1.1.0</version>
+    <version>1.2.0</version>
     <name>SSH MCP Server</name>
     <description>Secure, multi-server SSH and SFTP MCP server for Java 11+</description>
 
