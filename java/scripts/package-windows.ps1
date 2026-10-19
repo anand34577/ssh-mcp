@@ -21,6 +21,8 @@ Push-Location $repo
 try {
     & mvn.cmd -q clean package
     if ($LASTEXITCODE -ne 0) { throw "Maven build failed" }
+    [xml]$pom = Get-Content -Raw (Join-Path $repo "pom.xml")
+    $appVersion = $pom.project.version
 
     $dist = Join-Path $repo "dist"
     if (!(Test-Path -LiteralPath $dist)) { New-Item -ItemType Directory -Path $dist | Out-Null }
@@ -43,7 +45,7 @@ try {
         $native = Join-Path $dist "native"
         if (Test-Path -LiteralPath $native) { Remove-Item -LiteralPath $native -Recurse -Force }
         New-Item -ItemType Directory -Force -Path $native | Out-Null
-        & $jpackage.Source --type app-image --name ssh-mcp-server --app-version 1.0.0 --input $app --main-jar ssh-mcp-server.jar --main-class com.example.sshmcp.Main --runtime-image $runtime --dest $native --vendor "SSH MCP Server" --win-console
+        & $jpackage.Source --type app-image --name ssh-mcp-server --app-version $appVersion --input $app --main-jar ssh-mcp-server.jar --main-class com.example.sshmcp.Main --runtime-image $runtime --dest $native --vendor "SSH MCP Server" --win-console
         if ($LASTEXITCODE -ne 0) { throw "jpackage failed" }
         Write-Host "Native Windows app image: $native\ssh-mcp-server"
     }

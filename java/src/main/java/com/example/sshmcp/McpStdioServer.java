@@ -1,112 +1,262 @@
 package com.example.sshmcp;
 
+import com.fasterxml.jackson.core.JsonParser;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
-import com.fasterxml.jackson.core.JsonParser;
 
 import java.io.BufferedInputStream;
-import java.io.BufferedWriter;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
 import java.io.OutputStreamWriter;
+import java.io.Writer;
 import java.nio.ByteBuffer;
-import java.nio.charset.StandardCharsets;
 import java.nio.charset.CharacterCodingException;
 import java.nio.charset.CodingErrorAction;
+import java.nio.charset.StandardCharsets;
 import java.util.Arrays;
-import java.util.HashSet;
-import java.util.Set;
+import java.util.List;
+import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.Future;
+import java.util.concurrent.FutureTask;
+import java.util.concurrent.RejectedExecutionException;
+import java.util.concurrent.SynchronousQueue;
+import java.util.concurrent.ThreadPoolExecutor;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 
+/**
+ * A minimal MCP server over newline-delimited JSON-RPC on stdio. Tool calls run concurrently on a
+ * bounded worker pool, so a slow command never blocks ping or calls to other servers, and
+ * notifications/cancelled interrupts the matching call.
+ */
 final class McpStdioServer {
     private static final int MAX_MESSAGE_BYTES = 128 * 1024 * 1024;
+    private static final int MAX_CONCURRENT_CALLS = 64;
+    private static final long SHUTDOWN_WAIT_SECONDS = 10;
     private static final String SERVER_NAME = "ssh-mcp-server";
-    private static final String SERVER_VERSION = "1.0.0";
-    private static final String DEFAULT_PROTOCOL_VERSION = "2025-06-18";
-    private static final Set<String> SUPPORTED_PROTOCOLS = new HashSet<String>(Arrays.asList(
-            "2024-11-05", "2025-03-26", "2025-06-18", "2025-11-25"));
+    private static final String SERVER_TITLE = "SSH MCP Server";
+    /** Newest first; the first entry is offered when the client asks for an unsupported version. */
+    private static final List<String> SUPPORTED_PROTOCOLS = Arrays.asList(
+            "2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05");
+    private static final String OVERSIZED = "MCP message exceeds the maximum allowed size";
 
     private final ObjectMapper mapper;
     private final SshService ssh;
+    private final String version;
+    private final Map<String, Future<?>> inFlight = new ConcurrentHashMap<>();
+    private final ThreadPoolExecutor workers;
+    private Writer writer;
 
-    McpStdioServer(ObjectMapper mapper, SshService ssh) {
+    McpStdioServer(ObjectMapper mapper, SshService ssh, String version) {
         this.mapper = mapper;
         this.ssh = ssh;
+        this.version = version;
+        AtomicInteger threadNumber = new AtomicInteger();
+        this.workers = new ThreadPoolExecutor(0, MAX_CONCURRENT_CALLS, 60L, TimeUnit.SECONDS, new SynchronousQueue<>(), runnable -> {
+            Thread thread = new Thread(runnable, "ssh-mcp-call-" + threadNumber.incrementAndGet());
+            thread.setDaemon(true);
+            return thread;
+        });
     }
 
+    /** Serves requests until input ends, then waits briefly for in-flight calls to answer. */
     void run(InputStream input, OutputStream output) throws IOException {
         BufferedInputStream reader = new BufferedInputStream(input, 64 * 1024);
-        BufferedWriter writer = new BufferedWriter(new OutputStreamWriter(output, StandardCharsets.UTF_8));
-        byte[] frame;
-        while (true) {
-            try {
-                frame = readLineLimited(reader);
-            }
-            catch (IOException ex) {
-                if (!"MCP message exceeds the maximum allowed size".equals(ex.getMessage())) {
-                    throw ex;
+        writer = new OutputStreamWriter(output, StandardCharsets.UTF_8);
+        try {
+            byte[] frame;
+            while (true) {
+                try {
+                    frame = readLineLimited(reader);
                 }
-                AuditLog.failure("mcp_frame", ex);
-                writer.write(mapper.writeValueAsString(error(null, -32600, ex.getMessage())));
-                writer.newLine();
-                writer.flush();
-                return;
-            }
-            if (frame == null) {
-                break;
-            }
-            String line;
-            try {
-                line = StandardCharsets.UTF_8.newDecoder()
-                        .onMalformedInput(CodingErrorAction.REPORT)
-                        .onUnmappableCharacter(CodingErrorAction.REPORT)
-                        .decode(ByteBuffer.wrap(frame)).toString();
-            }
-            catch (CharacterCodingException ex) {
-                AuditLog.failure("mcp_request", ex);
-                writer.write(mapper.writeValueAsString(error(null, -32700, "Invalid UTF-8 JSON-RPC request")));
-                writer.newLine();
-                writer.flush();
-                continue;
-            }
-            if (line.trim().isEmpty()) {
-                continue;
-            }
-            ObjectNode response = null;
-            JsonNode requestId = null;
-            try {
-                JsonNode request;
-                try (JsonParser parser = mapper.getFactory().createParser(line)) {
-                    request = mapper.readTree(parser);
-                    if (parser.nextToken() != null) {
-                        throw new IOException("Trailing JSON-RPC data");
+                catch (IOException ex) {
+                    if (!OVERSIZED.equals(ex.getMessage())) {
+                        throw ex;
                     }
+                    AuditLog.failure("mcp_frame", ex);
+                    send(error(null, -32600, OVERSIZED));
+                    return;
                 }
-                if (request != null && request.isObject()) {
-                    requestId = request.get("id");
-                    if (!request.has("method")) {
-                        response = error(requestId, -32600, "method is required");
-                    }
-                    else {
-                        response = handle(request);
-                    }
+                if (frame == null) {
+                    return;
                 }
-                else {
-                    response = error(requestId, -32600, "Invalid Request");
+                handleFrame(frame);
+            }
+        }
+        finally {
+            workers.shutdown();
+            try {
+                if (!workers.awaitTermination(SHUTDOWN_WAIT_SECONDS, TimeUnit.SECONDS)) {
+                    workers.shutdownNow();
                 }
             }
-            catch (Exception ex) {
-                AuditLog.failure("mcp_request", ex);
-                response = error(null, -32700, "Invalid JSON-RPC request");
+            catch (InterruptedException ex) {
+                workers.shutdownNow();
+                Thread.currentThread().interrupt();
             }
-            if (response != null) {
-                writer.write(mapper.writeValueAsString(response));
-                writer.newLine();
-                writer.flush();
+        }
+    }
+
+    private void handleFrame(byte[] frame) throws IOException {
+        String line;
+        try {
+            line = StandardCharsets.UTF_8.newDecoder()
+                    .onMalformedInput(CodingErrorAction.REPORT)
+                    .onUnmappableCharacter(CodingErrorAction.REPORT)
+                    .decode(ByteBuffer.wrap(frame)).toString();
+        }
+        catch (CharacterCodingException ex) {
+            AuditLog.failure("mcp_request", ex);
+            send(error(null, -32700, "Invalid UTF-8 in JSON-RPC message"));
+            return;
+        }
+        if (line.trim().isEmpty()) {
+            return;
+        }
+        JsonNode request;
+        try (JsonParser parser = mapper.getFactory().createParser(line)) {
+            request = mapper.readTree(parser);
+            if (parser.nextToken() != null) {
+                throw new IOException("Trailing JSON-RPC data");
             }
+        }
+        catch (Exception ex) {
+            AuditLog.failure("mcp_request", ex);
+            send(error(null, -32700, "Parse error: invalid JSON"));
+            return;
+        }
+        if (request == null || !request.isObject()) {
+            send(error(null, -32600, "Invalid Request: expected a JSON object (batches are not supported)"));
+            return;
+        }
+        if (!request.has("method")) {
+            // A response from the client (we never send requests) or a malformed message.
+            if (!request.has("result") && !request.has("error")) {
+                send(error(request.get("id"), -32600, "Invalid Request: method is required"));
+            }
+            return;
+        }
+        ObjectNode response = handle(request);
+        if (response != null) {
+            send(response);
+        }
+    }
+
+    private ObjectNode handle(JsonNode request) {
+        String method = text(request, "method");
+        JsonNode id = request.get("id");
+        boolean hasId = id != null && !id.isNull();
+        try {
+            if (!"2.0".equals(text(request, "jsonrpc"))) {
+                return hasId ? error(id, -32600, "jsonrpc must be \"2.0\"") : null;
+            }
+            if (method == null) {
+                return hasId ? error(id, -32600, "method must be a string") : null;
+            }
+            switch (method) {
+                case "initialize":
+                    return hasId ? result(id, initialize(request.get("params"))) : null;
+                case "notifications/initialized":
+                case "initialized":
+                    return null;
+                case "notifications/cancelled":
+                    cancel(request.get("params"));
+                    return null;
+                case "ping":
+                    return hasId ? result(id, mapper.createObjectNode()) : null;
+                case "tools/list": {
+                    ObjectNode listing = mapper.createObjectNode();
+                    listing.set("tools", ToolSpecs.toolsList());
+                    return hasId ? result(id, listing) : null;
+                }
+                case "tools/call":
+                    return hasId ? startToolCall(id, request.get("params")) : null;
+                default:
+                    return hasId ? error(id, -32601, "Method not found: " + method) : null;
+            }
+        }
+        catch (Exception ex) {
+            AuditLog.failure("mcp_method=" + method, ex);
+            return hasId ? error(id, -32603, "Internal error") : null;
+        }
+    }
+
+    /** Runs the call on a worker and returns null; the worker sends the response itself. */
+    private ObjectNode startToolCall(JsonNode id, JsonNode params) {
+        if (params == null || !params.isObject() || text(params, "name") == null) {
+            return error(id, -32602, "tools/call requires params.name (a string)");
+        }
+        String name = text(params, "name");
+        JsonNode arguments = params.get("arguments");
+        String key = id.toString();
+        FutureTask<Void> task = new FutureTask<>(() -> {
+            ObjectNode response = result(id, toolPayload(ssh.call(name, arguments)));
+            // A cancelled call has already been removed; per MCP it gets no response.
+            if (inFlight.remove(key) != null) {
+                send(response);
+            }
+            return null;
+        });
+        if (inFlight.putIfAbsent(key, task) != null) {
+            return error(id, -32600, "A request with this id is already in progress");
+        }
+        try {
+            workers.execute(task);
+        }
+        catch (RejectedExecutionException ex) {
+            inFlight.remove(key);
+            return error(id, -32000, "Too many concurrent tool calls; retry shortly");
+        }
+        return null;
+    }
+
+    private void cancel(JsonNode params) {
+        JsonNode requestId = params == null ? null : params.get("requestId");
+        if (requestId != null) {
+            Future<?> call = inFlight.remove(requestId.toString());
+            if (call != null) {
+                call.cancel(true);
+            }
+        }
+    }
+
+    private ObjectNode toolPayload(SshService.ToolResult toolResult) throws IOException {
+        ObjectNode payload = mapper.createObjectNode();
+        ArrayNode content = payload.putArray("content");
+        ObjectNode text = content.addObject();
+        text.put("type", "text");
+        text.put("text", mapper.writeValueAsString(toolResult.payload()));
+        payload.set("structuredContent", toolResult.payload());
+        payload.put("isError", toolResult.isError());
+        return payload;
+    }
+
+    private ObjectNode initialize(JsonNode params) {
+        String requested = params == null ? null : text(params, "protocolVersion");
+        String selected = requested != null && SUPPORTED_PROTOCOLS.contains(requested) ? requested : SUPPORTED_PROTOCOLS.get(0);
+        ObjectNode result = mapper.createObjectNode();
+        result.put("protocolVersion", selected);
+        result.putObject("capabilities").putObject("tools").put("listChanged", false);
+        ObjectNode serverInfo = result.putObject("serverInfo");
+        serverInfo.put("name", SERVER_NAME);
+        serverInfo.put("title", SERVER_TITLE);
+        serverInfo.put("version", version);
+        result.put("instructions", ToolSpecs.INSTRUCTIONS);
+        return result;
+    }
+
+    /** Writes one message per line. Always "\n": MCP stdio framing must not depend on the platform. */
+    private void send(ObjectNode message) throws IOException {
+        String encoded = mapper.writeValueAsString(message);
+        synchronized (this) {
+            writer.write(encoded);
+            writer.write('\n');
+            writer.flush();
         }
     }
 
@@ -118,172 +268,11 @@ final class McpStdioServer {
                 return line.toByteArray();
             }
             if (line.size() >= MAX_MESSAGE_BYTES) {
-                throw new IOException("MCP message exceeds the maximum allowed size");
+                throw new IOException(OVERSIZED);
             }
             line.write(value);
         }
         return line.size() == 0 ? null : line.toByteArray();
-    }
-
-    private ObjectNode handle(JsonNode request) {
-        String method = text(request, "method");
-        JsonNode id = request.get("id");
-        boolean hasId = request.has("id");
-        try {
-            if (!"2.0".equals(text(request, "jsonrpc"))) {
-                return hasId ? error(id, -32600, "jsonrpc must be '2.0'") : null;
-            }
-            if (method == null) {
-                return hasId ? error(id, -32600, "method is required") : null;
-            }
-            if ("initialize".equals(method)) {
-                return hasId ? result(id, initialize(request)) : null;
-            }
-            if ("notifications/initialized".equals(method) || "initialized".equals(method)) {
-                return null;
-            }
-            if ("ping".equals(method)) {
-                return hasId ? result(id, mapper.createObjectNode()) : null;
-            }
-            if ("tools/list".equals(method)) {
-                return hasId ? result(id, toolsList()) : null;
-            }
-            if ("tools/call".equals(method)) {
-                JsonNode params = request.get("params");
-                if (params == null || !params.isObject() || !params.has("name")) {
-                    return hasId ? error(id, -32602, "tools/call requires params.name") : null;
-                }
-                String name = text(params, "name");
-                if (name == null) {
-                    return hasId ? error(id, -32602, "tools/call params.name must be a string") : null;
-                }
-                SshService.ToolResult toolResult = ssh.call(name, params.get("arguments"));
-                ObjectNode payload = mapper.createObjectNode();
-                ArrayNode content = payload.putArray("content");
-                ObjectNode contentItem = content.addObject();
-                contentItem.put("type", "text");
-                contentItem.put("text", mapper.writeValueAsString(toolResult.payload()));
-                payload.put("isError", toolResult.isError());
-                return hasId ? result(id, payload) : null;
-            }
-            if (!hasId) {
-                return null;
-            }
-            return error(id, -32601, "Method not found");
-        }
-        catch (Exception ex) {
-            AuditLog.failure("mcp_method=" + method, ex);
-            if (id == null) {
-                return null;
-            }
-            return error(id, -32603, "Internal error");
-        }
-    }
-
-    private ObjectNode initialize(JsonNode request) {
-        JsonNode params = request.get("params");
-        String requested = params == null ? null : text(params, "protocolVersion");
-        String selected = requested != null && SUPPORTED_PROTOCOLS.contains(requested)
-                ? requested : DEFAULT_PROTOCOL_VERSION;
-        ObjectNode result = mapper.createObjectNode();
-        result.put("protocolVersion", selected);
-        ObjectNode capabilities = result.putObject("capabilities");
-        capabilities.putObject("tools").put("listChanged", false);
-        ObjectNode serverInfo = result.putObject("serverInfo");
-        serverInfo.put("name", SERVER_NAME);
-        serverInfo.put("version", SERVER_VERSION);
-        result.put("instructions", "Use serverId from ssh_list_servers. SSH credentials are loaded from the MCP process environment and are never accepted as tool arguments or returned by the server. Host keys are verified against the configured known_hosts file.");
-        return result;
-    }
-
-    private ObjectNode toolsList() {
-        ObjectNode result = mapper.createObjectNode();
-        ArrayNode tools = result.putArray("tools");
-        tools.add(tool("ssh_list_servers", "List configured SSH targets and non-secret capabilities", objectSchema(
-                mapper.createObjectNode())));
-        tools.add(tool("ssh_exec", "Execute a command on a configured SSH target", schema(
-                property("serverId", "string", "Configured target id", true),
-                property("command", "string", "Remote command to execute", true),
-                property("timeoutMs", "integer", "Optional timeout, bounded by target policy", false),
-                property("maxOutputBytes", "integer", "Optional per-stream output cap", false))));
-        tools.add(tool("sftp_list", "List a remote directory", schema(
-                property("serverId", "string", "Configured target id", true),
-                property("path", "string", "Remote directory path", true),
-                property("maxEntries", "integer", "Maximum entries to return", false))));
-        tools.add(tool("sftp_stat", "Read remote file or directory metadata", schema(
-                property("serverId", "string", "Configured target id", true),
-                property("path", "string", "Remote path", true))));
-        tools.add(tool("sftp_read_file", "Read a remote file with an explicit byte limit", schema(
-                property("serverId", "string", "Configured target id", true),
-                property("path", "string", "Remote file path", true),
-                property("maxBytes", "integer", "Maximum bytes to read", false),
-                property("encoding", "string", "utf8 or base64", false))));
-        tools.add(tool("sftp_write_file", "Write a remote file; provide content or contentBase64", schema(
-                property("serverId", "string", "Configured target id", true),
-                property("path", "string", "Remote file path", true),
-                property("content", "string", "UTF-8 content", false),
-                property("contentBase64", "string", "Binary content encoded as base64", false))));
-        tools.add(tool("sftp_mkdir", "Create a remote directory", schema(
-                property("serverId", "string", "Configured target id", true),
-                property("path", "string", "Remote directory path", true))));
-        tools.add(tool("sftp_delete", "Delete one remote file or an empty directory", schema(
-                property("serverId", "string", "Configured target id", true),
-                property("path", "string", "Remote path", true),
-                property("directory", "boolean", "Set true only for an empty directory", false))));
-        tools.add(tool("ssh_tunnel_open", "Open a loopback-only local TCP forward", schema(
-                property("serverId", "string", "Configured target id", true),
-                property("localHost", "string", "Loopback bind address; defaults to 127.0.0.1", false),
-                property("localPort", "integer", "Local port, 0 chooses an available port", false),
-                property("remoteHost", "string", "Remote host visible from the SSH target", true),
-                property("remotePort", "integer", "Remote TCP port", true))));
-        tools.add(tool("ssh_tunnel_close", "Close an SSH local port forward", schema(
-                property("tunnelId", "string", "Tunnel id returned by ssh_tunnel_open", true))));
-        tools.add(tool("ssh_tunnel_list", "List active SSH tunnels without credentials", objectSchema(
-                mapper.createObjectNode())));
-        return result;
-    }
-
-    private ObjectNode tool(String name, String description, ObjectNode inputSchema) {
-        ObjectNode result = mapper.createObjectNode();
-        result.put("name", name);
-        result.put("description", description);
-        result.set("inputSchema", inputSchema);
-        return result;
-    }
-
-    private ObjectNode schema(ObjectNode... properties) {
-        ObjectNode result = mapper.createObjectNode();
-        result.put("type", "object");
-        ObjectNode propertyMap = result.putObject("properties");
-        ArrayNode required = result.putArray("required");
-        for (ObjectNode property : properties) {
-            String name = property.remove("__name").asText();
-            boolean isRequired = property.remove("__required").asBoolean();
-            propertyMap.set(name, property);
-            if (isRequired) {
-                required.add(name);
-            }
-        }
-        result.put("additionalProperties", false);
-        return result;
-    }
-
-    private ObjectNode property(String name, String type, String description, boolean required) {
-        ObjectNode result = mapper.createObjectNode();
-        result.put("__name", name);
-        result.put("__required", required);
-        result.put("type", type);
-        result.put("description", description);
-        return result;
-    }
-
-    private ObjectNode objectSchema(ObjectNode ignored) {
-        ObjectNode result = mapper.createObjectNode();
-        result.put("type", "object");
-        result.putObject("properties");
-        result.putArray("required");
-        result.put("additionalProperties", false);
-        return result;
     }
 
     private ObjectNode result(JsonNode id, ObjectNode result) {

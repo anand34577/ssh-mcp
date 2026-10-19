@@ -14,6 +14,7 @@ esac
 
 cd "$REPO"
 mvn -q clean package
+APP_VERSION=$(unzip -p "$REPO/target/ssh-mcp-server.jar" META-INF/MANIFEST.MF | sed -n 's/^Implementation-Version: *//p' | tr -d '\r')
 
 DIST="$REPO/dist"
 RUNTIME="$DIST/runtime"
@@ -37,7 +38,7 @@ if command -v jpackage >/dev/null 2>&1; then
   NATIVE="$DIST/native"
   rm -rf "$NATIVE"
   mkdir -p "$NATIVE"
-  jpackage --type app-image --name ssh-mcp-server --app-version 1.0.0 \
+  jpackage --type app-image --name ssh-mcp-server --app-version "$APP_VERSION" \
     --input "$APP" --main-jar ssh-mcp-server.jar --main-class com.example.sshmcp.Main \
     --runtime-image "$RUNTIME" --dest "$NATIVE" --vendor "SSH MCP Server"
   echo "Native app image: $NATIVE/ssh-mcp-server"

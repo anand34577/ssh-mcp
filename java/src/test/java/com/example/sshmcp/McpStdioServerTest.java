@@ -39,7 +39,7 @@ class McpStdioServerTest {
                 + "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/list\",\"params\":{}}\n"
                 + "{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"tools/call\",\"params\":{\"name\":\"ssh_list_servers\",\"arguments\":{}}}\n";
         ByteArrayOutputStream output = new ByteArrayOutputStream();
-        new McpStdioServer(mapper, ssh).run(new ByteArrayInputStream(input.getBytes(StandardCharsets.UTF_8)), output);
+        new McpStdioServer(mapper, ssh, "test").run(new ByteArrayInputStream(input.getBytes(StandardCharsets.UTF_8)), output);
 
         String[] lines = output.toString(StandardCharsets.UTF_8.name()).trim().split("\\R");
         assertEquals(3, lines.length);
@@ -48,6 +48,35 @@ class McpStdioServerTest {
         String listing = mapper.readTree(lines[2]).path("result").path("content").get(0).path("text").asText();
         assertTrue(listing.contains("secretsExposedToModel"));
         assertTrue(!listing.contains("SSH_MCP_TEST_PASSWORD"));
+        assertEquals("test", mapper.readTree(lines[2]).path("result").path("structuredContent").path("servers").get(0).path("id").asText());
+        assertTrue(!output.toString(StandardCharsets.UTF_8.name()).contains("\r"), "frames must end with \\n only");
+
+        for (com.fasterxml.jackson.databind.JsonNode tool : mapper.readTree(lines[1]).path("result").path("tools")) {
+            assertTrue(tool.path("annotations").has("readOnlyHint"), tool.toString());
+            tool.path("inputSchema").path("properties").forEach(property ->
+                    assertTrue(!property.path("description").asText().isEmpty(), tool.toString()));
+        }
+    }
+
+    @Test
+    void unknownArgumentsAreToolErrorsListingExpectedNames() throws Exception {
+        Path knownHosts = Files.createFile(tempDir.resolve("known_hosts_args"));
+        ObjectNode config = mapper.createObjectNode();
+        config.put("id", "test");
+        config.put("host", "example.test");
+        config.put("username", "operator");
+        config.put("passwordEnv", "SSH_MCP_TEST_PASSWORD");
+        config.put("knownHostsPath", knownHosts.toString());
+        Config.ServerConfig server = Config.ServerConfig.from(config);
+        SshService ssh = new SshService(mapper, new Config.ServerCatalog(tempDir.resolve("s.json"),
+                Collections.singletonMap("test", server)));
+        String input = "{\"jsonrpc\":\"2.0\",\"id\":\"a\",\"method\":\"tools/call\",\"params\":{\"name\":\"ssh_exec\",\"arguments\":{\"serverId\":\"test\",\"cmd\":\"ls\"}}}\n";
+        ByteArrayOutputStream output = new ByteArrayOutputStream();
+        new McpStdioServer(mapper, ssh, "test").run(new ByteArrayInputStream(input.getBytes(StandardCharsets.UTF_8)), output);
+        com.fasterxml.jackson.databind.JsonNode result = mapper.readTree(output.toString(StandardCharsets.UTF_8.name()).trim()).path("result");
+        assertTrue(result.path("isError").asBoolean());
+        assertEquals("invalid_arguments", result.path("structuredContent").path("errorCode").asText());
+        assertTrue(result.path("structuredContent").path("message").asText().contains("command"));
     }
 
     @Test
@@ -69,7 +98,7 @@ class McpStdioServerTest {
                 + "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"ping\"} {\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"ping\"}\n"
                 + "{\"jsonrpc\":\"2.0\",\"method\":\"ping\"}\n";
         ByteArrayOutputStream output = new ByteArrayOutputStream();
-        new McpStdioServer(mapper, ssh).run(new ByteArrayInputStream(input.getBytes(StandardCharsets.UTF_8)), output);
+        new McpStdioServer(mapper, ssh, "test").run(new ByteArrayInputStream(input.getBytes(StandardCharsets.UTF_8)), output);
 
         String[] lines = output.toString(StandardCharsets.UTF_8.name()).trim().split("\\R");
         assertEquals(3, lines.length);
