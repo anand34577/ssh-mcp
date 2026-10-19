@@ -31,6 +31,7 @@ The Go and Java servers must stay interchangeable for MCP clients. When you chan
 
 - Tool names, descriptions, and argument schemas: `go/internal/mcpserver/server.go` and `java/.../ToolSpecs.java`.
 - Configuration validation: `go/internal/config/config.go` and `java/.../Config.java`, plus `config/servers.schema.json`.
+- System protection rules (`protectSystem`): `go/internal/sshservice/guard.go` and `java/.../SystemGuard.java`. Their tests share the same cases (`guard_test.go`, `SystemGuardTest.java`); add new cases to both.
 - Documentation: the root README's configuration and tool tables, and `skills/ssh-mcp/references/tools.md`.
 
 ## Privacy promise

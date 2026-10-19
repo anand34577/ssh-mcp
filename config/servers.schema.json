@@ -50,6 +50,11 @@
           "type": "array",
           "items": { "type": "string", "minLength": 1 },
           "description": "Regular expressions; any match rejects the command. Use the RE2/Java-compatible subset."
+        },
+        "protectSystem": {
+          "type": "boolean",
+          "default": true,
+          "description": "Refuses commands and file changes that could wipe, break, or switch off the server (rm -rf /, deleting system or home folders, formatting disks, writing to raw disks, shutdown/reboot, editing /etc/passwd or /etc/shadow). Set false to turn this safety net off."
         }
       }
     }

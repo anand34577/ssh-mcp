@@ -27,7 +27,7 @@ class SshServiceTest {
         Config.ServerConfig server = Config.ServerConfig.from(node);
 
         assertThrows(SshService.OperationRejected.class,
-                () -> SshService.checkCommandPolicy(server, "systemctl status ; rm -rf /"));
+                () -> SshService.checkCommandPolicy(server, "systemctl status ; cat /etc/hostname"));
         assertThrows(SshService.OperationRejected.class,
                 () -> SshService.checkCommandPolicy(server, "systemctl status-malicious"));
         SshService.checkCommandPolicy(server, "systemctl status\tunit");
@@ -42,6 +42,22 @@ class SshServiceTest {
 
         assertThrows(SshService.OperationRejected.class,
                 () -> SshService.checkCommandPolicy(server, "echo rm"));
+    }
+
+    @Test
+    void systemProtectionIsOnByDefaultAndCanBeTurnedOff() throws Exception {
+        Config.ServerConfig on = Config.ServerConfig.from(baseServer());
+        SshService.OperationRejected rejected = assertThrows(SshService.OperationRejected.class,
+                () -> SshService.checkCommandPolicy(on, "rm -rf /"));
+        assertTrue(rejected.getMessage().contains("\"protectSystem\": false for server \"test\""), rejected.getMessage());
+        assertThrows(SshService.OperationRejected.class,
+                () -> SshService.checkPathGuard(on, "sftp_delete", "/etc", false));
+
+        ObjectNode node = baseServer();
+        node.put("protectSystem", false);
+        Config.ServerConfig off = Config.ServerConfig.from(node);
+        SshService.checkCommandPolicy(off, "rm -rf /");
+        SshService.checkPathGuard(off, "sftp_delete", "/etc", false);
     }
 
     @Test

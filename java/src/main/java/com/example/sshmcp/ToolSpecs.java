@@ -22,7 +22,7 @@ final class ToolSpecs {
             + "Workflow: call ssh_list_servers first and use its \"id\" as serverId. Check each server's sftpEnabled, portForwardingEnabled, allowedCommandPrefixes, commandTimeoutMs, and maxOutputBytes before acting.\n"
             + "Prefer sftp_* tools over shell commands for reading and writing files. ssh_exec runs a non-interactive command with no TTY: avoid commands that prompt (use flags like -y), page output, or run forever. A non-zero exitCode is a normal result, not a tool failure; timedOut=true means the command was killed.\n"
             + "When stdoutTruncated/stderrTruncated or sftp_read_file truncated is true, narrow the command or page with offset=nextOffset instead of retrying unchanged.\n"
-            + "Close every tunnel you open with ssh_tunnel_close. Confirm with the user before destructive actions (deleting files, restarting services, overwriting configuration).";
+            + "Close every tunnel you open with ssh_tunnel_close. Confirm with the user before destructive actions (deleting files, restarting services, overwriting configuration). If a call fails with \"blocked by system protection\" or \"not allowed by the server command policy\", stop and tell the user; never rephrase, encode, or split the command to get around it.";
 
     private static final String SERVER_ID = "Server id from ssh_list_servers";
     private static final Map<String, Spec> SPECS = new LinkedHashMap<>();

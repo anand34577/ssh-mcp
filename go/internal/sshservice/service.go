@@ -85,6 +85,7 @@ func (s *Service) ListServers() []map[string]any {
 			"maxConcurrentTunnels":    server.MaxConcurrentTunnels,
 			"allowedCommandPrefixes":  allowedPrefixes,
 			"deniedCommandRuleCount":  len(server.DeniedPatterns),
+			"protectSystem":           server.ProtectSystem,
 		})
 	}
 	return items

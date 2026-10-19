@@ -57,7 +57,8 @@ Paths can start with `~/` for your home folder.
 | `allowSftp` | Allow reading and changing files | `true` |
 | `allowPortForwarding` | Allow tunnels | `false` |
 | `allowedCommandPrefixes` | If set, **only** commands starting with these are allowed, e.g. `["df", "uptime", "systemctl status"]` | no limit |
-| `deniedCommandRegexes` | Patterns that are always refused, e.g. `["(?i)\\b(shutdown|reboot)\\b"]` | none |
+| `deniedCommandRegexes` | Extra patterns you never want run, e.g. `["(?i)\\bapt(-get)? remove\\b"]` | none |
+| `protectSystem` | Blocks actions that could wipe or break the server, like `rm -rf /` or formatting a disk. See [Staying Safe](Staying-Safe#the-safety-net). | `true` (on) |
 | `commandTimeoutMs` | Longest a command may run, in milliseconds | `60000` (1 minute) |
 | `maxOutputBytes` | Most output kept per command or file read | `1048576` (1 MB) |
 | `connectTimeoutMs` | How long to wait when connecting | `10000` (10 s) |

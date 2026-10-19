@@ -116,7 +116,7 @@ func TestToolCallsReturnStructuredResultsAndErrors(t *testing.T) {
 		t.Fatalf("unexpected listing: %s", encoded)
 	}
 
-	rejected, err := session.CallTool(ctx, &mcp.CallToolParams{Name: "ssh_exec", Arguments: map[string]any{"serverId": "demo", "command": "rm -rf /"}})
+	rejected, err := session.CallTool(ctx, &mcp.CallToolParams{Name: "ssh_exec", Arguments: map[string]any{"serverId": "demo", "command": "cat /etc/hostname"}})
 	if err != nil {
 		t.Fatal(err)
 	}
