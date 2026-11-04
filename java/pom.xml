@@ -14,7 +14,7 @@
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
         <maven.compiler.release>11</maven.compiler.release>
         <jackson.version>2.22.4</jackson.version>
-        <sshd.version>2.20.0</sshd.version>
+        <sshd.version>2.20.1</sshd.version>
         <bouncycastle.version>1.86</bouncycastle.version>
         <slf4j.version>2.0.20</slf4j.version>
         <!-- JUnit 6 requires Java 17; stay on 5.x to keep the Java 11 baseline. -->
